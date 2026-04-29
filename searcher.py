@@ -10,7 +10,7 @@ from datetime import datetime
 from abc import ABC, abstractmethod
 
 from logger import get_logger
-from console import print_error, print_warning, highlight_search_error
+from console import print_error, highlight_search_error
 
 logger = get_logger()
 
@@ -31,7 +31,7 @@ class NewsDeduplicator:
         检查新闻是否重复
 
         Args:
-            news: 新闻字典，包含 url 和 title
+            news: 新闻字典
 
         Returns:
             是否重复
@@ -39,7 +39,7 @@ class NewsDeduplicator:
         url = news.get("url", "")
         title = news.get("title", "")
 
-        # 按 URL 去重
+        # 按URL去重
         if url and url in self.seen_urls:
             return True
 
@@ -96,13 +96,13 @@ class BaseSearchProvider(ABC):
             max_results: 返回结果数量
 
         Returns:
-            搜索结果列表，每项包含 title, url, content
+            搜索结果列表，每项包含title, url, content
         """
         pass
 
 
 class TavilySearchProvider(BaseSearchProvider):
-    """Tavily 搜索提供者"""
+    """Tavily搜索提供者"""
 
     def __init__(self, api_key: str, timeout: int = 40, max_retries: int = 3):
         """
@@ -155,25 +155,28 @@ class TavilySearchProvider(BaseSearchProvider):
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                logger.info(f"搜索尝试 {attempt}/{self.max_retries}: {query}")
+                logger.info(f"搜索尝试 {attempt}/{self.max_retries}: {query[:50]}...")
                 result = self._search_once(query, max_results)
                 return self._format_results(result)
             except requests.exceptions.RequestException as e:
                 last_error = e
                 logger.warning(f"搜索失败（尝试 {attempt}/{self.max_retries}）: {e}")
                 if attempt < self.max_retries:
-                    wait_time = 2 ** attempt  # 指数退避
+                    wait_time = 2 ** attempt
                     logger.info(f"等待 {wait_time} 秒后重试...")
                     time.sleep(wait_time)
 
         # 全部失败
         error_msg = highlight_search_error(last_error)
         print_error(error_msg)
-        logger.error(f"搜索最终失败: {query}, error={last_error}")
+        logger.error(f"搜索最终失败: {last_error}")
         return []
 
     def _format_results(self, raw_result: Dict) -> List[Dict]:
         """格式化搜索结果"""
+        if "error" in raw_result:
+            return []
+
         results = raw_result.get("results", [])
         formatted = []
 
@@ -211,17 +214,16 @@ class StockSearcher:
         Args:
             stock_code: 股票代码
             stock_name: 股票名称
-            max_results: 返回结果数量
+            max_results: 每类搜索结果数量
 
         Returns:
             新闻列表
         """
         all_news = []
 
-        # 1. 搜索新闻
+        # 1. 搜索新闻资讯
         try:
-            query = f"{stock_name} {stock_code} 最新新闻 市场动态"
-            logger.info(f"搜索个股新闻: {query}")
+            query = f"{stock_name} {stock_code} 股票最新新闻 2024"
             results = self.provider.search(query, max_results=max_results)
             for r in results:
                 r["source_type"] = "news"
@@ -229,17 +231,27 @@ class StockSearcher:
         except Exception as e:
             logger.warning(f"搜索个股新闻失败: {stock_name}, error={e}")
 
-        # 2. 搜索论坛（雪球、股吧）
+        # 2. 搜索雪球热帖
         if self.enable_forum:
             try:
-                query = f"{stock_name} {stock_code} 雪球 股吧 论坛讨论 投资者情绪"
-                logger.info(f"搜索个股论坛: {query}")
+                query = f"site:xueqiu.com {stock_name} {stock_code} 热帖 讨论"
                 results = self.provider.search(query, max_results=max_results)
                 for r in results:
                     r["source_type"] = "forum"
                 all_news.extend(results)
             except Exception as e:
-                logger.warning(f"搜索个股论坛失败: {stock_name}, error={e}")
+                logger.warning(f"搜索雪球失败: {stock_name}, error={e}")
+
+        # 3. 搜索股吧热帖
+        if self.enable_forum:
+            try:
+                query = f"site:guba.eastmoney.com {stock_name} {stock_code} 股吧 评论"
+                results = self.provider.search(query, max_results=max_results)
+                for r in results:
+                    r["source_type"] = "forum"
+                all_news.extend(results)
+            except Exception as e:
+                logger.warning(f"搜索股吧失败: {stock_name}, error={e}")
 
         # 去重
         deduplicator = NewsDeduplicator()
@@ -263,8 +275,7 @@ class StockSearcher:
 
         # 1. 搜索行业新闻
         try:
-            query = f"{industry_name} 最新新闻 市场分析 政策动态"
-            logger.info(f"搜索行业新闻: {query}")
+            query = f"{industry_name} 行业最新新闻 市场分析 2024"
             results = self.provider.search(query, max_results=max_results)
             for r in results:
                 r["source_type"] = "news"
@@ -275,8 +286,7 @@ class StockSearcher:
         # 2. 搜索行业论坛讨论
         if self.enable_forum:
             try:
-                query = f"{industry_name} 投资者讨论 市场情绪 雪球 股吧"
-                logger.info(f"搜索行业论坛: {query}")
+                query = f"{industry_name} 投资者讨论 雪球 股吧 2024"
                 results = self.provider.search(query, max_results=max_results)
                 for r in results:
                     r["source_type"] = "forum"

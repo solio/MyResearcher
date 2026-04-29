@@ -11,7 +11,7 @@ from difflib import SequenceMatcher
 from config import Config
 from searcher import TavilySearchProvider, StockSearcher, NewsDeduplicator
 from llm import DeepSeekLLMProvider, StockAnalyzer
-from emotion import EmotionAnalyzer, PostData
+from emotion import EmotionAnalyzer, PostData, PostType
 from logger import get_logger
 from console import print_warning
 
@@ -181,7 +181,7 @@ class StockResearcher:
         研究单只股票
 
         Args:
-            stock: 股票字典
+            stock: 股票信息
 
         Returns:
             研究结果
@@ -216,9 +216,17 @@ class StockResearcher:
                 # 分类帖子
                 result.classified_posts = self.emotion_analyzer.classify_posts(result.news_list, stock)
 
-                # 分析每个帖子的情绪
-                for post in result.classified_posts:
-                    post.emotion_score = self.analyzer.analyze_post_emotion(post.title, post.content)
+                # 分离出需要分析的帖子
+                emotion_posts = [p for p in result.classified_posts if p.post_type]
+
+                if emotion_posts:
+                    # 批量分析情绪（节省token）
+                    logger.info(f"批量分析 {len(emotion_posts)} 个帖子的情绪")
+                    emotion_map = self.analyzer.analyze_batch_post_emotions(emotion_posts)
+
+                    # 回填情绪值
+                    for i, post in enumerate(emotion_posts):
+                        post.emotion_score = emotion_map.get(i, 0.0)
 
                 # 计算综合情绪值
                 result.emotion_score = self.emotion_analyzer.calculate_emotion_score(result.classified_posts, stock)
@@ -230,7 +238,7 @@ class StockResearcher:
                 params = self.emotion_analyzer.get_or_create_params(stock)
                 auto_suggestion = params.check_param_update(self.config)
 
-                # LLM 给出调整建议
+                # LLM给出调整建议
                 llm_suggestion = self.analyzer.suggest_emotion_params(
                     stock["name"],
                     params.market_cap,
@@ -245,9 +253,9 @@ class StockResearcher:
                 if auto_suggestion:
                     result.param_suggestion += f"【自动调整建议】\n{auto_suggestion}\n\n"
                 if llm_suggestion:
-                    result.param_suggestion += f"【LLM 调整建议】\n{llm_suggestion}\n"
+                    result.param_suggestion += f"【LLM调整建议】\n{llm_suggestion}\n"
 
-                # 5. LLM 深度分析（带情绪值）
+                # 5. LLM深度分析（带情绪值）
                 result.analysis = self.analyzer.analyze_news_with_sentiment(
                     result.news_list,
                     target_name,
@@ -257,14 +265,14 @@ class StockResearcher:
                 )
 
                 if result.analysis == "分析失败":
-                    result.failure_reason = "LLM 分析失败"
-                    print_warning(f"{target_name} 分析摘要环节失败")
+                    result.failure_reason = "LLM分析失败"
+                    print_warning(f"{target_name}分析摘要环节失败")
 
         except Exception as e:
             logger.error(f"研究股票失败: {target_name}, error={e}", exc_info=True)
             result.failure_reason = str(e)
-            result.analysis = f"研究失败：{str(e)}"
-            print_warning(f"{target_name} 研究失败: {str(e)}")
+            result.analysis = f"研究失败: {str(e)}"
+            print_warning(f"{target_name}研究失败: {str(e)}")
 
         return result
 
@@ -301,7 +309,7 @@ class StockResearcher:
                 result.analysis = "今日无重大更新，内容与上期相似。"
                 return result
 
-            # 4. LLM 深度分析（行业暂不做复杂情绪分析）
+            # 4. LLM深度分析（行业暂不做复杂情绪分析）
             if result.news_list:
                 result.analysis = self.analyzer.analyze_news_with_sentiment(
                     result.news_list,
@@ -309,14 +317,14 @@ class StockResearcher:
                     "industry"
                 )
                 if result.analysis == "分析失败":
-                    result.failure_reason = "LLM 分析失败"
-                    print_warning(f"{industry_name} 分析摘要环节失败")
+                    result.failure_reason = "LLM分析失败"
+                    print_warning(f"{industry_name}分析摘要环节失败")
 
         except Exception as e:
             logger.error(f"研究行业失败: {industry_name}, error={e}", exc_info=True)
             result.failure_reason = str(e)
-            result.analysis = f"研究失败：{str(e)}"
-            print_warning(f"{industry_name} 研究失败: {str(e)}")
+            result.analysis = f"研究失败: {str(e)}"
+            print_warning(f"{industry_name}研究失败: {str(e)}")
 
         return result
 
@@ -361,7 +369,7 @@ class StockResearcher:
 
     def save_results(self, results: List[ResearchResult]) -> str:
         """
-        保存研究结果到文件（按日期目录组织，文件名带时间）
+        保存研究结果到文件
 
         Args:
             results: 研究结果列表
@@ -369,10 +377,9 @@ class StockResearcher:
         Returns:
             保存的纪要文件路径
         """
-        # 获取今日目录
         output_dir = self.config.get_output_dir_for_date(self.today_str)
 
-        # 1. 保存原始数据（JSON）
+        # 1. 保存原始数据
         data_file = os.path.join(output_dir, f"{self.now_str}-数据.json")
         data = {
             "date": self.today_str,
@@ -382,13 +389,13 @@ class StockResearcher:
         with open(data_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-        # 2. 保存投研纪要（Markdown）
+        # 2. 保存投研纪要
         md_file = os.path.join(output_dir, f"{self.now_str}-纪要.md")
         md_content = self._generate_markdown_report(results)
         with open(md_file, "w", encoding="utf-8") as f:
             f.write(md_content)
 
-        logger.info(f"结果已保存:")
+        logger.info(f"结果已保存")
         logger.info(f"  - {data_file}")
         logger.info(f"  - {md_file}")
 
@@ -396,13 +403,13 @@ class StockResearcher:
 
     def _generate_markdown_report(self, results: List[ResearchResult]) -> str:
         """
-        生成 Markdown 格式报告
+        生成Markdown格式报告
 
         Args:
             results: 研究结果列表
 
         Returns:
-            Markdown 字符串
+            Markdown字符串
         """
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -416,19 +423,19 @@ class StockResearcher:
             else:
                 md += f"## 🏭 行业研究: {result.target_name}\n\n"
 
-            # 如果是无更新，简单显示
+            # 无更新情况
             if result.is_no_update:
                 md += "⚠️ 今日无重大更新，内容与上期相似。\n\n"
                 md += "---\n\n"
                 continue
 
-            # 如果失败，显示失败原因
+            # 失败情况
             if result.failure_reason:
                 md += f"❌ 研究失败: {result.failure_reason}\n\n"
                 md += "---\n\n"
                 continue
 
-            # 显示情绪值
+            # 情绪指标
             if result.target_type == "stock":
                 emotion_label = "中性"
                 if result.emotion_score > 0.6:
@@ -440,15 +447,30 @@ class StockResearcher:
                 elif result.emotion_score < -0.2:
                     emotion_label = "😟 恐惧"
 
-                md += f"### 情绪指标\n\n"
+                md += "### 情绪指标\n\n"
                 md += f"- 综合情绪值: **{result.emotion_score:.3f}**\n"
                 md += f"- 情绪标签: {emotion_label}\n\n"
+
+                if result.classified_posts:
+                    # 统计分类
+                    xueqiu_hot = sum(1 for p in result.classified_posts if p.post_type == PostType.XUEQIU_HOT)
+                    xueqiu_explosive = sum(1 for p in result.classified_posts if p.post_type == PostType.XUEQIU_EXPLOSIVE)
+                    guba_hot = sum(1 for p in result.classified_posts if p.post_type == PostType.GUBA_HOT)
+                    guba_explosive = sum(1 for p in result.classified_posts if p.post_type == PostType.GUBA_EXPLOSIVE)
+                    guba_normal = sum(1 for p in result.classified_posts if p.post_type == PostType.GUBA_NORMAL)
+
+                    md += f"- 雪球热帖: {xueqiu_hot}\n"
+                    md += f"- 雪球爆值帖: {xueqiu_explosive}\n"
+                    md += f"- 股吧热度帖: {guba_hot}\n"
+                    md += f"- 股吧爆值帖: {guba_explosive}\n"
+                    md += f"- 股吧普通帖: {guba_normal}\n\n"
 
                 if result.param_suggestion:
                     md += f"### 参数调整建议\n\n"
                     md += result.param_suggestion + "\n\n"
 
-            md += f"### 新闻列表\n\n"
+            # 新闻列表
+            md += "### 新闻列表\n\n"
             if result.news_list:
                 for i, news in enumerate(result.news_list, 1):
                     source_tag = "📰 新闻" if news.get("source_type") == "news" else "💬 论坛"
@@ -457,8 +479,9 @@ class StockResearcher:
             else:
                 md += "暂无新闻\n\n"
 
+            # 分析摘要
             if result.analysis:
-                md += f"### 分析摘要\n\n"
+                md += "### 分析摘要\n\n"
                 if result.analysis == "分析失败":
                     md += "❌ 分析失败\n\n"
                 else:

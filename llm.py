@@ -124,7 +124,7 @@ class StockAnalyzer:
 
     def analyze_post_emotion(self, title: str, content: str) -> float:
         """
-        分析单个帖子的情绪
+        分析单个帖子的情绪（保留兼容，主要用批量版本）
 
         Args:
             title: 标题
@@ -164,6 +164,69 @@ class StockAnalyzer:
             pass
 
         return 0.0
+
+    def analyze_batch_post_emotions(self, posts: List) -> Dict[int, float]:
+        """
+        批量分析多个帖子的情绪（节省token）
+
+        Args:
+            posts: PostData列表
+
+        Returns:
+            {索引: 情绪值}字典
+        """
+        if not posts:
+            return {}
+
+        # 构建批量分析提示词
+        posts_text = ""
+        for i, post in enumerate(posts):
+            posts_text += f"【帖子{i}】\n"
+            posts_text += f"标题：{post.title}\n"
+            posts_text += f"内容：{post.content[:200]}\n\n"
+
+        prompt = f"""
+请分析以下{len(posts)}个帖子的情绪，每个帖子返回一个-1到1之间的数字：
+-1表示极度悲观/利空
+0表示中性
+1表示极度乐观/利多
+
+{posts_text}
+
+请按格式返回，每行一个数字，格式为：
+帖子编号: 情绪值
+例如：
+0: 0.5
+1: -0.2
+2: 0.0
+"""
+
+        messages = [{"role": "user", "content": prompt}]
+        result = self.llm.chat(messages, temperature=0.3, max_tokens=500)
+
+        if result is None:
+            return {i: 0.0 for i in range(len(posts))}
+
+        # 解析结果
+        emotion_map = {}
+        try:
+            import re
+            lines = result.strip().split("\n")
+            for line in lines:
+                match = re.search(r'(\d+)\s*:\s*([-+]?\d*\.?\d+)', line)
+                if match:
+                    idx = int(match.group(1))
+                    score = float(match.group(2))
+                    emotion_map[idx] = max(-1.0, min(1.0, score))
+        except Exception as e:
+            logger.warning(f"批量情绪分析结果解析失败: {e}")
+
+        # 填充缺失的为0
+        for i in range(len(posts)):
+            if i not in emotion_map:
+                emotion_map[i] = 0.0
+
+        return emotion_map
 
     def suggest_emotion_params(self, stock_name: str, market_cap: float,
                                current_thresholds: Dict, history_data: List[Dict]) -> Optional[str]:
