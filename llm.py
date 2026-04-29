@@ -4,7 +4,7 @@ LLM 模块
 """
 import requests
 import time
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from abc import ABC, abstractmethod
 
 from logger import get_logger
@@ -122,9 +122,96 @@ class StockAnalyzer:
         """
         self.llm = llm_provider
 
+    def analyze_post_emotion(self, title: str, content: str) -> float:
+        """
+        分析单个帖子的情绪
+
+        Args:
+            title: 标题
+            content: 内容
+
+        Returns:
+            情绪值：-1（极度悲观）到 1（极度乐观）
+        """
+        prompt = f"""
+请分析以下帖子的情绪，只返回一个-1到1之间的数字：
+-1表示极度悲观/利空
+0表示中性
+1表示极度乐观/利多
+
+【帖子标题】
+{title}
+
+【帖子内容】
+{content[:300]}
+
+只返回数字，不要其他文字。
+"""
+        messages = [{"role": "user", "content": prompt}]
+        result = self.llm.chat(messages, temperature=0.3, max_tokens=100)
+
+        if result is None:
+            return 0.0
+
+        # 尝试提取数字
+        try:
+            import re
+            match = re.search(r"[-+]?\d*\.\d+|\d+", result)
+            if match:
+                num = float(match.group())
+                return max(-1.0, min(1.0, num))
+        except Exception:
+            pass
+
+        return 0.0
+
+    def suggest_emotion_params(self, stock_name: str, market_cap: float,
+                               current_thresholds: Dict, history_data: List[Dict]) -> Optional[str]:
+        """
+        让LLM给出情绪参数调整建议
+
+        Args:
+            stock_name: 股票名称
+            market_cap: 市值
+            current_thresholds: 当前阈值
+            history_data: 历史数据
+
+        Returns:
+            调整建议
+        """
+        history_text = ""
+        for d in history_data[-10:]:  # 最近10天
+            history_text += f"{d.get('date')}: 热度帖{d.get('hot_post_count')}, 爆值帖{d.get('explosive_post_count')}, 平均回复{d.get('avg_reply_count'):.1f}, 平均点赞{d.get('avg_like_count'):.1f}\n"
+
+        prompt = f"""
+你是一位量化交易专家。请分析以下数据，给出情绪参数的调整建议。
+
+【股票】{stock_name}
+【市值】{market_cap} 亿
+
+【当前阈值】
+- 股吧热度回复阈值: {current_thresholds.get('guba_hot_reply_threshold', 2.0)}
+- 股吧热度点赞阈值: {current_thresholds.get('guba_hot_like_threshold', 2.0)}
+
+【历史数据（最近10天）】
+{history_text}
+
+【调整规则】
+- 如果热度帖数量持续高于预期，建议向上调整阈值
+- 如果热度帖数量持续低于预期，建议向下调整阈值
+- 最低阈值不低于1
+- 请同时考虑市值因素（市值越高，讨论热度自然也越高）
+
+请给出具体的调整建议和理由。
+"""
+        messages = [{"role": "user", "content": prompt}]
+        return self.llm.chat(messages, temperature=0.5, max_tokens=1000)
+
     def analyze_news_with_sentiment(self, news_list: List[Dict],
                                     target_name: str,
-                                    target_type: str = "stock") -> Optional[str]:
+                                    target_type: str = "stock",
+                                    emotion_score: float = 0.0,
+                                    classified_posts: List = None) -> Optional[str]:
         """
         分析新闻并进行市场情绪分析
 
@@ -132,6 +219,8 @@ class StockAnalyzer:
             news_list: 新闻列表
             target_name: 研究目标名称
             target_type: 研究类型
+            emotion_score: 计算出的情绪值
+            classified_posts: 已分类的帖子
 
         Returns:
             分析摘要，失败返回 None
@@ -159,8 +248,42 @@ class StockAnalyzer:
                 news_text += f"   链接: {post.get('url', '')}\n"
                 news_text += f"   摘要: {post.get('content', '')[:250]}...\n\n"
 
+        # 构建分类帖子信息
+        classified_text = ""
+        if classified_posts:
+            # 按类型统计
+            from emotion import PostType
+            xueqiu_hot = [p for p in classified_posts if p.post_type == PostType.XUEQIU_HOT]
+            xueqiu_explosive = [p for p in classified_posts if p.post_type == PostType.XUEQIU_EXPLOSIVE]
+            guba_hot = [p for p in classified_posts if p.post_type == PostType.GUBA_HOT]
+            guba_explosive = [p for p in classified_posts if p.post_type == PostType.GUBA_EXPLOSIVE]
+
+            classified_text += f"【帖子分类统计】\n"
+            classified_text += f"- 雪球热帖: {len(xueqiu_hot)} 帖\n"
+            classified_text += f"- 雪球爆值帖: {len(xueqiu_explosive)} 帖\n"
+            classified_text += f"- 股吧热度帖: {len(guba_hot)} 帖\n"
+            classified_text += f"- 股吧爆值帖: {len(guba_explosive)} 帖\n"
+
+            # 列出爆值帖
+            explosive_posts = xueqiu_explosive + guba_explosive
+            if explosive_posts:
+                classified_text += "\n【爆值帖详情】\n"
+                for i, p in enumerate(explosive_posts[:3], 1):
+                    classified_text += f"{i}. 标题: {p.title}\n"
+                    classified_text += f"   情绪分: {p.emotion_score:.2f}\n"
+
         # 构建提示词
         target_desc = f"{target_name}（个股）" if target_type == "stock" else f"{target_name}（行业）"
+
+        emotion_label = "中性"
+        if emotion_score > 0.6:
+            emotion_label = "极度贪婪"
+        elif emotion_score > 0.2:
+            emotion_label = "贪婪"
+        elif emotion_score < -0.6:
+            emotion_label = "极度恐惧"
+        elif emotion_score < -0.2:
+            emotion_label = "恐惧"
 
         prompt = f"""
 你是一位有15年经验的价值投资分析师，精通行为金融学。请基于以下信息对{target_desc}进行深度分析。
@@ -169,6 +292,12 @@ class StockAnalyzer:
 - 坚持"他人恐惧我贪婪，他人贪婪我逃避"的逆向投资理念
 - 区分"短期情绪"和"长期基本面"
 - 重视安全边际
+
+【量化情绪指标】
+- 综合情绪值: {emotion_score:.3f}
+- 情绪标签: {emotion_label}
+
+{classified_text}
 
 【信息来源】
 {news_text}
@@ -219,7 +348,7 @@ class StockAnalyzer:
 
         logger.info(f"调用 LLM 分析: {target_name}")
         messages = [{"role": "user", "content": prompt}]
-        result = self.llm.chat(messages, temperature=0.6, max_tokens=2500)
+        result = self.llm.chat(messages, temperature=0.6, max_tokens=3000)
 
         if result is None:
             return "分析失败"
@@ -267,8 +396,10 @@ class DeepSeekLLM(StockAnalyzer):
 
     def analyze_news_with_sentiment(self, news_list: List[Dict],
                                     target_name: str,
-                                    target_type: str = "stock") -> Optional[str]:
-        return super().analyze_news_with_sentiment(news_list, target_name, target_type)
+                                    target_type: str = "stock",
+                                    emotion_score: float = 0.0,
+                                    classified_posts: List = None) -> Optional[str]:
+        return super().analyze_news_with_sentiment(news_list, target_name, target_type, emotion_score, classified_posts)
 
     def generate_summary(self, news_list: List[Dict]) -> Optional[str]:
         return super().generate_summary(news_list)

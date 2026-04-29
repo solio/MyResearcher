@@ -11,6 +11,7 @@ from difflib import SequenceMatcher
 from config import Config
 from searcher import TavilySearchProvider, StockSearcher, NewsDeduplicator
 from llm import DeepSeekLLMProvider, StockAnalyzer
+from emotion import EmotionAnalyzer, PostData
 from logger import get_logger
 from console import print_warning
 
@@ -25,7 +26,7 @@ class ResearchResult:
         初始化研究结果
 
         Args:
-            target_type: 研究类型 ("stock" 或 "industry")
+            target_type: 研究类型 ("stock" or "industry")
             target_name: 研究目标名称
         """
         self.target_type = target_type
@@ -37,6 +38,11 @@ class ResearchResult:
         self.is_no_update = False  # 标记是否与上期相同
         self.failure_reason = ""  # 失败原因
 
+        # 情绪分析相关
+        self.emotion_score: float = 0.0
+        self.classified_posts: List[PostData] = []
+        self.param_suggestion: str = ""
+
     def to_dict(self) -> Dict:
         """转换为字典"""
         return {
@@ -47,7 +53,9 @@ class ResearchResult:
             "summary": self.summary,
             "timestamp": self.timestamp,
             "is_no_update": self.is_no_update,
-            "failure_reason": self.failure_reason
+            "failure_reason": self.failure_reason,
+            "emotion_score": self.emotion_score,
+            "param_suggestion": self.param_suggestion
         }
 
 
@@ -160,6 +168,9 @@ class StockResearcher:
         )
         self.analyzer = StockAnalyzer(llm_provider)
 
+        # 初始化情绪分析器
+        self.emotion_analyzer = EmotionAnalyzer(config)
+
         self.history_manager = HistoryManager(config.OUTPUT_DIR)
         self.results = []
         self.today_str = datetime.now().strftime("%Y%m%d")
@@ -200,17 +211,54 @@ class StockResearcher:
                 result.analysis = "今日无重大更新，内容与上期相似。"
                 return result
 
-            # 4. LLM 深度分析
+            # 4. 情绪分析流程
             if result.news_list:
-                analysis = self.analyzer.analyze_news_with_sentiment(
+                # 分类帖子
+                result.classified_posts = self.emotion_analyzer.classify_posts(result.news_list, stock)
+
+                # 分析每个帖子的情绪
+                for post in result.classified_posts:
+                    post.emotion_score = self.analyzer.analyze_post_emotion(post.title, post.content)
+
+                # 计算综合情绪值
+                result.emotion_score = self.emotion_analyzer.calculate_emotion_score(result.classified_posts, stock)
+
+                # 记录每日统计
+                self.emotion_analyzer.record_stock_daily_stats(stock["code"], result.classified_posts, self.today_str)
+
+                # 检查参数更新
+                params = self.emotion_analyzer.get_or_create_params(stock)
+                auto_suggestion = params.check_param_update(self.config)
+
+                # LLM 给出调整建议
+                llm_suggestion = self.analyzer.suggest_emotion_params(
+                    stock["name"],
+                    params.market_cap,
+                    {
+                        "guba_hot_reply_threshold": params.guba_hot_reply_threshold,
+                        "guba_hot_like_threshold": params.guba_hot_like_threshold
+                    },
+                    params.history
+                )
+
+                result.param_suggestion = ""
+                if auto_suggestion:
+                    result.param_suggestion += f"【自动调整建议】\n{auto_suggestion}\n\n"
+                if llm_suggestion:
+                    result.param_suggestion += f"【LLM 调整建议】\n{llm_suggestion}\n"
+
+                # 5. LLM 深度分析（带情绪值）
+                result.analysis = self.analyzer.analyze_news_with_sentiment(
                     result.news_list,
                     target_name,
-                    "stock"
+                    "stock",
+                    result.emotion_score,
+                    result.classified_posts
                 )
-                if analysis == "分析失败":
+
+                if result.analysis == "分析失败":
                     result.failure_reason = "LLM 分析失败"
                     print_warning(f"{target_name} 分析摘要环节失败")
-                result.analysis = analysis
 
         except Exception as e:
             logger.error(f"研究股票失败: {target_name}, error={e}", exc_info=True)
@@ -253,17 +301,16 @@ class StockResearcher:
                 result.analysis = "今日无重大更新，内容与上期相似。"
                 return result
 
-            # 4. LLM 深度分析
+            # 4. LLM 深度分析（行业暂不做复杂情绪分析）
             if result.news_list:
-                analysis = self.analyzer.analyze_news_with_sentiment(
+                result.analysis = self.analyzer.analyze_news_with_sentiment(
                     result.news_list,
                     industry_name,
                     "industry"
                 )
-                if analysis == "分析失败":
+                if result.analysis == "分析失败":
                     result.failure_reason = "LLM 分析失败"
                     print_warning(f"{industry_name} 分析摘要环节失败")
-                result.analysis = analysis
 
         except Exception as e:
             logger.error(f"研究行业失败: {industry_name}, error={e}", exc_info=True)
@@ -305,6 +352,9 @@ class StockResearcher:
             except Exception as e:
                 logger.error(f"研究行业异常: {industry}, error={e}", exc_info=True)
                 # 即使失败也继续下一个
+
+        # 保存情绪参数
+        self.emotion_analyzer.save_params()
 
         self.results = all_results
         return all_results
@@ -378,12 +428,32 @@ class StockResearcher:
                 md += "---\n\n"
                 continue
 
+            # 显示情绪值
+            if result.target_type == "stock":
+                emotion_label = "中性"
+                if result.emotion_score > 0.6:
+                    emotion_label = "😃 极度贪婪"
+                elif result.emotion_score > 0.2:
+                    emotion_label = "🙂 贪婪"
+                elif result.emotion_score < -0.6:
+                    emotion_label = "😱 极度恐惧"
+                elif result.emotion_score < -0.2:
+                    emotion_label = "😟 恐惧"
+
+                md += f"### 情绪指标\n\n"
+                md += f"- 综合情绪值: **{result.emotion_score:.3f}**\n"
+                md += f"- 情绪标签: {emotion_label}\n\n"
+
+                if result.param_suggestion:
+                    md += f"### 参数调整建议\n\n"
+                    md += result.param_suggestion + "\n\n"
+
             md += f"### 新闻列表\n\n"
             if result.news_list:
                 for i, news in enumerate(result.news_list, 1):
                     source_tag = "📰 新闻" if news.get("source_type") == "news" else "💬 论坛"
-                    md += f"{i}. {source_tag} [{news['title']}]({news['url']})\n"
-                    md += f"   - {news['content'][:150]}...\n\n"
+                    md += f"{i}. {source_tag} [{news.get('title', '')}]({news.get('url', '')})\n"
+                    md += f"   - {news.get('content', '')[:150]}...\n\n"
             else:
                 md += "暂无新闻\n\n"
 

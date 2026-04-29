@@ -50,6 +50,25 @@ class Config:
         self.LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "90"))  # LLM超时时间（秒）
         self.LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))  # LLM最大重试次数
 
+        # ========== 情绪分析配置 ==========
+        self.EMOTION_XUEQIU_WEIGHT = float(os.getenv("EMOTION_XUEQIU_WEIGHT", "0.5"))  # 雪球权重
+        self.EMOTION_GUBA_HOT_WEIGHT = float(os.getenv("EMOTION_GUBA_HOT_WEIGHT", "0.2"))  # 股吧热度权重
+        self.EMOTION_GUBA_EXPLOSIVE_WEIGHT = float(os.getenv("EMOTION_GUBA_EXPLOSIVE_WEIGHT", "0.2"))  # 股吧爆值权重
+        self.EMOTION_GUBA_NORMAL_WEIGHT = float(os.getenv("EMOTION_GUBA_NORMAL_WEIGHT", "0.1"))  # 股吧普值权重
+
+        self.EMOTION_GUBA_HOT_REPLY_BASE = int(os.getenv("EMOTION_GUBA_HOT_REPLY_BASE", "2"))  # 股吧热度回帖数基数
+        self.EMOTION_GUBA_HOT_LIKE_BASE = int(os.getenv("EMOTION_GUBA_HOT_LIKE_BASE", "2"))  # 股吧热度点赞数基数
+        self.EMOTION_GUBA_EXPLOSIVE_REPLY = int(os.getenv("EMOTION_GUBA_EXPLOSIVE_REPLY", "10"))  # 股吧爆值回帖数
+        self.EMOTION_GUBA_EXPLOSIVE_LIKE = int(os.getenv("EMOTION_GUBA_EXPLOSIVE_LIKE", "10"))  # 股吧爆值点赞数
+        self.EMOTION_XUEQIU_EXPLOSIVE_REPLY = int(os.getenv("EMOTION_XUEQIU_EXPLOSIVE_REPLY", "100"))  # 雪球爆值回帖数
+        self.EMOTION_XUEQIU_EXPLOSIVE_LIKE = int(os.getenv("EMOTION_XUEQIU_EXPLOSIVE_LIKE", "100"))  # 雪球爆值点赞数
+
+        self.EMOTION_PARAM_UPDATE_DAYS = int(os.getenv("EMOTION_PARAM_UPDATE_DAYS", "5"))  # 参数更新天数
+        self.EMOTION_PARAM_CHANGE_THRESHOLD = float(os.getenv("EMOTION_PARAM_CHANGE_THRESHOLD", "0.5"))  # 参数更新阈值
+        self.EMOTION_PARAM_MIN = int(os.getenv("EMOTION_PARAM_MIN", "1"))  # 参数最小值
+
+        self.EMOTION_DATA_FILE = os.getenv("EMOTION_DATA_FILE", "./output/emotion_params.json")  # 情绪参数文件
+
         # ========== 输出配置 ==========
         self.OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./output")
         self.LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -63,7 +82,7 @@ class Config:
 
         兼容两种格式：
         - 代码|名称
-        - 代码|名称|行业
+        - 代码|名称|行业|市值（可选，单位亿）
 
         Args:
             stock_str: 股票列表字符串
@@ -85,7 +104,8 @@ class Config:
                 stocks.append({
                     "code": parts[0].strip(),
                     "name": parts[1].strip(),
-                    "industry": parts[2].strip() if len(parts) >= 3 else ""
+                    "industry": parts[2].strip() if len(parts) >= 3 else "",
+                    "market_cap": float(parts[3].strip()) if len(parts) >= 4 else 100.0  # 默认100亿
                 })
 
         return stocks
