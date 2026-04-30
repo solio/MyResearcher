@@ -50,6 +50,12 @@ class Config:
         self.LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "90"))  # LLM超时时间（秒）
         self.LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))  # LLM最大重试次数
 
+        # ========== 搜索过滤配置 ==========
+        self.SEARCH_TIME_RANGE_DAYS = int(os.getenv("SEARCH_TIME_RANGE_DAYS", "60"))  # 搜索时间范围：默认2个月
+        self.SEARCH_MIN_CONTENT_LENGTH = int(os.getenv("SEARCH_MIN_CONTENT_LENGTH", "50"))  # 内容最小长度
+        self.SEARCH_MAX_PAGES = int(os.getenv("SEARCH_MAX_PAGES", "3"))  # 最大翻页次数
+        self.ENABLE_CONTENT_CLEANUP = os.getenv("ENABLE_CONTENT_CLEANUP", "true").lower() == "true"  # 是否清理模板内容
+
         # ========== 情绪分析配置 ==========
         self.EMOTION_XUEQIU_WEIGHT = float(os.getenv("EMOTION_XUEQIU_WEIGHT", "0.5"))  # 雪球权重
         self.EMOTION_GUBA_HOT_WEIGHT = float(os.getenv("EMOTION_GUBA_HOT_WEIGHT", "0.2"))  # 股吧热度权重

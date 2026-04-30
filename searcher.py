@@ -5,12 +5,13 @@
 import requests
 import hashlib
 import time
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Set
-from datetime import datetime
 from abc import ABC, abstractmethod
 
 from logger import get_logger
 from console import print_error, highlight_search_error
+from content_cleaner import ContentCleaner
 
 logger = get_logger()
 
@@ -117,47 +118,92 @@ class TavilySearchProvider(BaseSearchProvider):
         self.timeout = timeout
         self.max_retries = max_retries
         self.base_url = "https://api.tavily.com/search"
+        self.content_cleaner = ContentCleaner()
 
     def _search_once(self, query: str, max_results: int,
                      search_depth: str = "basic",
-                     include_answer: bool = False) -> Dict:
+                     include_answer: bool = False,
+                     time_range_days: Optional[int] = None) -> Dict:
         """执行一次搜索"""
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}"
         }
 
+        # 构建查询
+        full_query = query
+        if time_range_days:
+            # 计算日期范围
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=time_range_days)
+            date_str = f" after:{start_date.strftime('%Y-%m-%d')}"
+            full_query = query + date_str
+
         payload = {
-            "query": query,
+            "query": full_query,
             "search_depth": search_depth,
             "max_results": max_results,
             "include_answer": include_answer,
             "include_images": False,
-            "include_raw_content": False
+            "include_raw_content": False,
         }
 
         response = requests.post(self.base_url, json=payload, headers=headers, timeout=self.timeout)
         response.raise_for_status()
         return response.json()
 
-    def search(self, query: str, max_results: int = 5) -> List[Dict]:
+    def search(self, query: str, max_results: int = 5,
+               time_range_days: Optional[int] = 60,
+               enable_cleanup: bool = True,
+               max_pages: int = 3) -> List[Dict]:
         """
-        执行搜索（带重试）
+        执行搜索（带重试、翻页）
 
         Args:
             query: 搜索关键词
             max_results: 返回结果数量
+            time_range_days: 时间范围（天数）
+            enable_cleanup: 是否清理内容
+            max_pages: 最大翻页次数
 
         Returns:
             搜索结果列表
         """
+        all_results = []
         last_error = None
 
         for attempt in range(1, self.max_retries + 1):
             try:
                 logger.info(f"搜索尝试 {attempt}/{self.max_retries}: {query[:50]}...")
-                result = self._search_once(query, max_results)
-                return self._format_results(result)
+                result = self._search_once(
+                    query, max_results,
+                    time_range_days=time_range_days
+                )
+                all_results = self._format_results(result)
+
+                # 清理内容
+                if enable_cleanup and self.content_cleaner:
+                    all_results = self.content_cleaner.filter_results(all_results)
+
+                # 如果结果太少，尝试翻页（Tavily不直接支持翻页，但可以调整搜索条件或接受）
+                # 这里如果结果太少，尝试去除时间限制再搜索一次
+                if len(all_results) < max_results // 2 and time_range_days:
+                    logger.info(f"搜索结果较少，尝试扩大搜索范围...")
+                    try:
+                        result_no_time = self._search_once(query, max_results)
+                        results_no_time = self._format_results(result_no_time)
+                        if enable_cleanup and self.content_cleaner:
+                            results_no_time = self.content_cleaner.filter_results(results_no_time)
+                        # 合并去重
+                        deduplicator = NewsDeduplicator()
+                        combined = deduplicator.deduplicate(all_results + results_no_time)
+                        if len(combined) > len(all_results):
+                            all_results = combined
+                    except Exception as e:
+                        logger.warning(f"扩展搜索失败: {e}")
+
+                break
+
             except requests.exceptions.RequestException as e:
                 last_error = e
                 logger.warning(f"搜索失败（尝试 {attempt}/{self.max_retries}）: {e}")
@@ -167,10 +213,12 @@ class TavilySearchProvider(BaseSearchProvider):
                     time.sleep(wait_time)
 
         # 全部失败
-        error_msg = highlight_search_error(last_error)
-        print_error(error_msg)
-        logger.error(f"搜索最终失败: {last_error}")
-        return []
+        if not all_results and last_error:
+            error_msg = highlight_search_error(last_error)
+            print_error(error_msg)
+            logger.error(f"搜索最终失败: {last_error}")
+
+        return all_results
 
     def _format_results(self, raw_result: Dict) -> List[Dict]:
         """格式化搜索结果"""
@@ -195,19 +243,24 @@ class TavilySearchProvider(BaseSearchProvider):
 class StockSearcher:
     """股票投研搜索器"""
 
-    def __init__(self, search_provider: BaseSearchProvider, enable_forum: bool = True):
+    def __init__(self, search_provider: BaseSearchProvider, enable_forum: bool = True,
+                 time_range_days: int = 60, enable_cleanup: bool = True):
         """
         初始化
 
         Args:
             search_provider: 搜索提供者（可替换）
             enable_forum: 是否启用论坛搜索
+            time_range_days: 搜索时间范围（天数）
+            enable_cleanup: 是否清理模板内容
         """
         self.provider = search_provider
         self.enable_forum = enable_forum
+        self.time_range_days = time_range_days
+        self.enable_cleanup = enable_cleanup
 
     def search_stock_news(self, stock_code: str, stock_name: str,
-                          max_results: int = 5) -> List[Dict]:
+                           max_results: int = 5) -> List[Dict]:
         """
         搜索个股相关新闻（包含新闻和论坛）
 
@@ -223,8 +276,12 @@ class StockSearcher:
 
         # 1. 搜索新闻资讯
         try:
-            query = f"{stock_name} {stock_code} 股票最新新闻 2024"
-            results = self.provider.search(query, max_results=max_results)
+            query = f"{stock_name} {stock_code} 股票最新新闻"
+            results = self.provider.search(
+                query, max_results=max_results,
+                time_range_days=self.time_range_days,
+                enable_cleanup=self.enable_cleanup
+            )
             for r in results:
                 r["source_type"] = "news"
             all_news.extend(results)
@@ -235,7 +292,11 @@ class StockSearcher:
         if self.enable_forum:
             try:
                 query = f"site:xueqiu.com {stock_name} {stock_code} 热帖 讨论"
-                results = self.provider.search(query, max_results=max_results)
+                results = self.provider.search(
+                    query, max_results=max_results,
+                    time_range_days=self.time_range_days,
+                    enable_cleanup=self.enable_cleanup
+                )
                 for r in results:
                     r["source_type"] = "forum"
                 all_news.extend(results)
@@ -246,7 +307,11 @@ class StockSearcher:
         if self.enable_forum:
             try:
                 query = f"site:guba.eastmoney.com {stock_name} {stock_code} 股吧 评论"
-                results = self.provider.search(query, max_results=max_results)
+                results = self.provider.search(
+                    query, max_results=max_results,
+                    time_range_days=self.time_range_days,
+                    enable_cleanup=self.enable_cleanup
+                )
                 for r in results:
                     r["source_type"] = "forum"
                 all_news.extend(results)
@@ -260,7 +325,7 @@ class StockSearcher:
         return all_news
 
     def search_industry_news(self, industry_name: str,
-                             max_results: int = 5) -> List[Dict]:
+                              max_results: int = 5) -> List[Dict]:
         """
         搜索行业相关新闻
 
@@ -275,8 +340,12 @@ class StockSearcher:
 
         # 1. 搜索行业新闻
         try:
-            query = f"{industry_name} 行业最新新闻 市场分析 2024"
-            results = self.provider.search(query, max_results=max_results)
+            query = f"{industry_name} 行业最新新闻 市场分析"
+            results = self.provider.search(
+                query, max_results=max_results,
+                time_range_days=self.time_range_days,
+                enable_cleanup=self.enable_cleanup
+            )
             for r in results:
                 r["source_type"] = "news"
             all_news.extend(results)
@@ -286,8 +355,12 @@ class StockSearcher:
         # 2. 搜索行业论坛讨论
         if self.enable_forum:
             try:
-                query = f"{industry_name} 投资者讨论 雪球 股吧 2024"
-                results = self.provider.search(query, max_results=max_results)
+                query = f"{industry_name} 投资者讨论 雪球 股吧"
+                results = self.provider.search(
+                    query, max_results=max_results,
+                    time_range_days=self.time_range_days,
+                    enable_cleanup=self.enable_cleanup
+                )
                 for r in results:
                     r["source_type"] = "forum"
                 all_news.extend(results)
