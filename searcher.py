@@ -10,7 +10,7 @@ from typing import List, Dict, Optional, Set
 from abc import ABC, abstractmethod
 
 from logger import get_logger
-from console import print_error, highlight_search_error
+from console import print_warning, highlight_search_error
 from content_cleaner import ContentCleaner
 
 logger = get_logger()
@@ -133,7 +133,6 @@ class TavilySearchProvider(BaseSearchProvider):
         # 构建查询
         full_query = query
         if time_range_days:
-            # 计算日期范围
             end_date = datetime.now()
             start_date = end_date - timedelta(days=time_range_days)
             date_str = f" after:{start_date.strftime('%Y-%m-%d')}"
@@ -157,7 +156,7 @@ class TavilySearchProvider(BaseSearchProvider):
                enable_cleanup: bool = True,
                max_pages: int = 3) -> List[Dict]:
         """
-        执行搜索（带重试、翻页）
+        执行搜索（带重试、翻页、结果不足时的fallback）
 
         Args:
             query: 搜索关键词
@@ -172,11 +171,12 @@ class TavilySearchProvider(BaseSearchProvider):
         all_results = []
         last_error = None
 
+        # 策略1: 先用带时间限制的搜索
         for attempt in range(1, self.max_retries + 1):
             try:
-                logger.info(f"搜索尝试 {attempt}/{self.max_retries}: {query[:50]}...")
+                logger.info(f"搜索尝试 {attempt}/{self.max_retries}: {query[:60]}...")
                 result = self._search_once(
-                    query, max_results,
+                    query, max_results * 2,  # 多请求一些，留出过滤空间
                     time_range_days=time_range_days
                 )
                 all_results = self._format_results(result)
@@ -184,23 +184,6 @@ class TavilySearchProvider(BaseSearchProvider):
                 # 清理内容
                 if enable_cleanup and self.content_cleaner:
                     all_results = self.content_cleaner.filter_results(all_results)
-
-                # 如果结果太少，尝试翻页（Tavily不直接支持翻页，但可以调整搜索条件或接受）
-                # 这里如果结果太少，尝试去除时间限制再搜索一次
-                if len(all_results) < max_results // 2 and time_range_days:
-                    logger.info(f"搜索结果较少，尝试扩大搜索范围...")
-                    try:
-                        result_no_time = self._search_once(query, max_results)
-                        results_no_time = self._format_results(result_no_time)
-                        if enable_cleanup and self.content_cleaner:
-                            results_no_time = self.content_cleaner.filter_results(results_no_time)
-                        # 合并去重
-                        deduplicator = NewsDeduplicator()
-                        combined = deduplicator.deduplicate(all_results + results_no_time)
-                        if len(combined) > len(all_results):
-                            all_results = combined
-                    except Exception as e:
-                        logger.warning(f"扩展搜索失败: {e}")
 
                 break
 
@@ -212,11 +195,62 @@ class TavilySearchProvider(BaseSearchProvider):
                     logger.info(f"等待 {wait_time} 秒后重试...")
                     time.sleep(wait_time)
 
+        # 策略2: 如果结果太少，放宽时间限制再试一次
+        if len(all_results) < max_results // 2 and time_range_days:
+            logger.info(f"结果不足({len(all_results)}条)，放宽时间限制重新搜索...")
+            try:
+                result = self._search_once(
+                    query, max_results * 2,
+                    time_range_days=None  # 不限制时间
+                )
+                more_results = self._format_results(result)
+
+                # 清理内容
+                if enable_cleanup and self.content_cleaner:
+                    more_results = self.content_cleaner.filter_results(more_results)
+
+                # 合并去重
+                seen_urls = set(r.get("url", "") for r in all_results)
+                for r in more_results:
+                    if r.get("url", "") not in seen_urls:
+                        all_results.append(r)
+                        seen_urls.add(r.get("url", ""))
+
+                logger.info(f"放宽时间后新增 {len(more_results)} 条，共 {len(all_results)} 条")
+
+            except Exception as e:
+                logger.warning(f"放宽时间搜索失败: {e}")
+
+        # 策略3: 如果还是很少，尝试不带时间的简单query再搜索
+        if len(all_results) < max_results // 2:
+            logger.info(f"结果仍然不足，尝试简化搜索词...")
+            try:
+                # 提取核心关键词（取前几个词）
+                simple_query = " ".join(query.split()[:3])
+                result = self._search_once(
+                    simple_query, max_results * 3,
+                    time_range_days=None
+                )
+                more_results = self._format_results(result)
+
+                if enable_cleanup and self.content_cleaner:
+                    more_results = self.content_cleaner.filter_results(more_results)
+
+                seen_urls = set(r.get("url", "") for r in all_results)
+                for r in more_results:
+                    if r.get("url", "") not in seen_urls:
+                        all_results.append(r)
+                        seen_urls.add(r.get("url", ""))
+
+                logger.info(f"简化搜索后共 {len(all_results)} 条")
+
+            except Exception as e:
+                logger.warning(f"简化搜索失败: {e}")
+
         # 全部失败
         if not all_results and last_error:
             error_msg = highlight_search_error(last_error)
-            print_error(error_msg)
-            logger.error(f"搜索最终失败: {last_error}")
+            print_warning(f"搜索query失败: {query[:50]}...")
 
         return all_results
 
@@ -259,6 +293,36 @@ class StockSearcher:
         self.time_range_days = time_range_days
         self.enable_cleanup = enable_cleanup
 
+    def _multi_query_search(self, queries: List[str], max_results_per_query: int = 3) -> List[Dict]:
+        """
+        多query组合搜索
+
+        Args:
+            queries: 多个搜索query
+            max_results_per_query: 每个query返回的结果数
+
+        Returns:
+            合并后的结果
+        """
+        all_results = []
+        deduplicator = NewsDeduplicator()
+
+        for query in queries:
+            try:
+                results = self.provider.search(
+                    query, max_results_per_query,
+                    self.time_range_days,
+                    self.enable_cleanup
+                )
+                for r in results:
+                    if not deduplicator.is_duplicate(r):
+                        deduplicator.add(r)
+                        all_results.append(r)
+            except Exception as e:
+                logger.warning(f"搜索query失败: {query[:50]}..., error: {e}")
+
+        return all_results
+
     def search_stock_news(self, stock_code: str, stock_name: str,
                            max_results: int = 5) -> List[Dict]:
         """
@@ -272,55 +336,52 @@ class StockSearcher:
         Returns:
             新闻列表
         """
-        all_news = []
+        # 更多query组合搜索新闻
+        news_queries = [
+            f"{stock_name} {stock_code} 最新新闻",
+            f"{stock_name} 股票分析 研报",
+            f"{stock_name} 最新消息 公告",
+            f"{stock_name} 股市 动态",
+            f"{stock_name} 行业 资讯",
+        ]
 
-        # 1. 搜索新闻资讯
-        try:
-            query = f"{stock_name} {stock_code} 股票最新新闻"
-            results = self.provider.search(
-                query, max_results=max_results,
-                time_range_days=self.time_range_days,
-                enable_cleanup=self.enable_cleanup
-            )
-            for r in results:
+        all_news = self._multi_query_search(news_queries, max_results_per_query=5)
+
+        # 更多query组合搜索论坛
+        if self.enable_forum:
+            forum_queries = [
+                f"site:xueqiu.com {stock_name} {stock_code}",
+                f"site:guba.eastmoney.com {stock_name} {stock_code}",
+                f"{stock_name} 雪球 讨论",
+                f"{stock_name} 股吧 热议",
+                f"{stock_name} 股民 讨论",
+            ]
+            forum_results = self._multi_query_search(forum_queries, max_results_per_query=4)
+            for r in forum_results:
+                r["source_type"] = "forum"
+                all_news.append(r)
+
+        # 标记新闻来源
+        for r in all_news:
+            if "source_type" not in r:
                 r["source_type"] = "news"
-            all_news.extend(results)
-        except Exception as e:
-            logger.warning(f"搜索个股新闻失败: {stock_name}, error={e}")
 
-        # 2. 搜索雪球热帖
-        if self.enable_forum:
-            try:
-                query = f"site:xueqiu.com {stock_name} {stock_code} 热帖 讨论"
-                results = self.provider.search(
-                    query, max_results=max_results,
-                    time_range_days=self.time_range_days,
-                    enable_cleanup=self.enable_cleanup
-                )
-                for r in results:
-                    r["source_type"] = "forum"
-                all_news.extend(results)
-            except Exception as e:
-                logger.warning(f"搜索雪球失败: {stock_name}, error={e}")
+        # 最后整体去重
+        final_deduplicator = NewsDeduplicator()
+        all_news = final_deduplicator.deduplicate(all_news)
 
-        # 3. 搜索股吧热帖
-        if self.enable_forum:
-            try:
-                query = f"site:guba.eastmoney.com {stock_name} {stock_code} 股吧 评论"
-                results = self.provider.search(
-                    query, max_results=max_results,
-                    time_range_days=self.time_range_days,
-                    enable_cleanup=self.enable_cleanup
-                )
-                for r in results:
-                    r["source_type"] = "forum"
-                all_news.extend(results)
-            except Exception as e:
-                logger.warning(f"搜索股吧失败: {stock_name}, error={e}")
-
-        # 去重
-        deduplicator = NewsDeduplicator()
-        all_news = deduplicator.deduplicate(all_news)
+        # 如果结果仍然为空，添加一个标记条目
+        if not all_news:
+            logger.warning(f"{stock_name}({stock_code}) 未搜索到任何新闻")
+            all_news = [{
+                "title": f"【注意】{stock_name} 近期新闻不足",
+                "url": "",
+                "content": "根据搜索结果，近期没有找到足够的相关新闻。可能原因：1. 市场关注度较低；2. 搜索时间范围内无重大事件；3. 需要检查搜索配置。",
+                "published_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "source": "系统提示",
+                "source_type": "news",
+                "is_warning": True
+            }]
 
         return all_news
 
@@ -336,40 +397,50 @@ class StockSearcher:
         Returns:
             新闻列表
         """
-        all_news = []
+        # 更多query组合搜索新闻
+        news_queries = [
+            f"{industry_name} 行业 最新新闻 分析",
+            f"{industry_name} 产业链 政策",
+            f"{industry_name} 发展趋势",
+            f"{industry_name} 市场 动态",
+            f"{industry_name} 投资 资讯",
+        ]
 
-        # 1. 搜索行业新闻
-        try:
-            query = f"{industry_name} 行业最新新闻 市场分析"
-            results = self.provider.search(
-                query, max_results=max_results,
-                time_range_days=self.time_range_days,
-                enable_cleanup=self.enable_cleanup
-            )
-            for r in results:
-                r["source_type"] = "news"
-            all_news.extend(results)
-        except Exception as e:
-            logger.warning(f"搜索行业新闻失败: {industry_name}, error={e}")
+        all_news = self._multi_query_search(news_queries, max_results_per_query=5)
 
-        # 2. 搜索行业论坛讨论
+        # 搜索论坛讨论
         if self.enable_forum:
-            try:
-                query = f"{industry_name} 投资者讨论 雪球 股吧"
-                results = self.provider.search(
-                    query, max_results=max_results,
-                    time_range_days=self.time_range_days,
-                    enable_cleanup=self.enable_cleanup
-                )
-                for r in results:
-                    r["source_type"] = "forum"
-                all_news.extend(results)
-            except Exception as e:
-                logger.warning(f"搜索行业论坛失败: {industry_name}, error={e}")
+            forum_queries = [
+                f"{industry_name} 行业讨论 雪球",
+                f"{industry_name} 投资讨论",
+                f"{industry_name} 股吧 热议",
+            ]
+            forum_results = self._multi_query_search(forum_queries, max_results_per_query=4)
+            for r in forum_results:
+                r["source_type"] = "forum"
+                all_news.append(r)
 
-        # 去重
-        deduplicator = NewsDeduplicator()
-        all_news = deduplicator.deduplicate(all_news)
+        # 标记新闻来源
+        for r in all_news:
+            if "source_type" not in r:
+                r["source_type"] = "news"
+
+        # 最后整体去重
+        final_deduplicator = NewsDeduplicator()
+        all_news = final_deduplicator.deduplicate(all_news)
+
+        # 如果结果仍然为空，添加一个标记条目
+        if not all_news:
+            logger.warning(f"{industry_name} 未搜索到任何新闻")
+            all_news = [{
+                "title": f"【注意】{industry_name} 近期新闻不足",
+                "url": "",
+                "content": "根据搜索结果，近期没有找到足够的相关行业新闻。可能原因：1. 行业整体关注度较低；2. 搜索时间范围内无重大事件；3. 需要检查搜索配置。",
+                "published_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "source": "系统提示",
+                "source_type": "news",
+                "is_warning": True
+            }]
 
         return all_news
 

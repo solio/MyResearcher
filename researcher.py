@@ -156,7 +156,12 @@ class StockResearcher:
             timeout=config.SEARCH_TIMEOUT,
             max_retries=config.SEARCH_MAX_RETRIES
         )
-        self.searcher = StockSearcher(search_provider, config.ENABLE_FORUM_SEARCH)
+        self.searcher = StockSearcher(
+            search_provider,
+            config.ENABLE_FORUM_SEARCH,
+            config.SEARCH_TIME_RANGE_DAYS,
+            config.ENABLE_CONTENT_CLEANUP
+        )
 
         # 初始化 LLM 提供者
         llm_provider = DeepSeekLLMProvider(
@@ -199,9 +204,14 @@ class StockResearcher:
                 max_results=self.config.SEARCH_RESULT_COUNT
             )
 
+            # 检查是否是警告标记
+            has_warning = len(result.news_list) == 1 and result.news_list[0].get("is_warning")
+
             # 2. 生成今日摘要
-            if result.news_list:
+            if result.news_list and not has_warning:
                 result.summary = self.analyzer.generate_summary(result.news_list) or ""
+            elif has_warning:
+                result.summary = result.news_list[0]["title"]
 
             # 3. 与昨日对比
             yesterday_summary = self.history_manager.load_yesterday_summary(target_name)
@@ -211,8 +221,8 @@ class StockResearcher:
                 result.analysis = "今日无重大更新，内容与上期相似。"
                 return result
 
-            # 4. 情绪分析流程
-            if result.news_list:
+            # 4. 情绪分析流程（仅在有真实新闻时）
+            if result.news_list and not has_warning:
                 # 分类帖子
                 result.classified_posts = self.emotion_analyzer.classify_posts(result.news_list, stock)
 
@@ -267,6 +277,9 @@ class StockResearcher:
                 if result.analysis == "分析失败":
                     result.failure_reason = "LLM分析失败"
                     print_warning(f"{target_name}分析摘要环节失败")
+            elif has_warning:
+                # 只有警告标记时
+                result.analysis = result.news_list[0]["content"]
 
         except Exception as e:
             logger.error(f"研究股票失败: {target_name}, error={e}", exc_info=True)
@@ -297,9 +310,14 @@ class StockResearcher:
                 max_results=self.config.SEARCH_RESULT_COUNT
             )
 
+            # 检查是否是警告标记
+            has_warning = len(result.news_list) == 1 and result.news_list[0].get("is_warning")
+
             # 2. 生成今日摘要
-            if result.news_list:
+            if result.news_list and not has_warning:
                 result.summary = self.analyzer.generate_summary(result.news_list) or ""
+            elif has_warning:
+                result.summary = result.news_list[0]["title"]
 
             # 3. 与昨日对比
             yesterday_summary = self.history_manager.load_yesterday_summary(industry_name)
@@ -310,7 +328,7 @@ class StockResearcher:
                 return result
 
             # 4. LLM深度分析（行业暂不做复杂情绪分析）
-            if result.news_list:
+            if result.news_list and not has_warning:
                 result.analysis = self.analyzer.analyze_news_with_sentiment(
                     result.news_list,
                     industry_name,
@@ -319,6 +337,9 @@ class StockResearcher:
                 if result.analysis == "分析失败":
                     result.failure_reason = "LLM分析失败"
                     print_warning(f"{industry_name}分析摘要环节失败")
+            elif has_warning:
+                # 只有警告标记时
+                result.analysis = result.news_list[0]["content"]
 
         except Exception as e:
             logger.error(f"研究行业失败: {industry_name}, error={e}", exc_info=True)
@@ -473,9 +494,20 @@ class StockResearcher:
             md += "### 新闻列表\n\n"
             if result.news_list:
                 for i, news in enumerate(result.news_list, 1):
-                    source_tag = "📰 新闻" if news.get("source_type") == "news" else "💬 论坛"
-                    md += f"{i}. {source_tag} [{news.get('title', '')}]({news.get('url', '')})\n"
-                    md += f"   - {news.get('content', '')[:150]}...\n\n"
+                    if news.get("is_warning"):
+                        md += f"⚠️ **{news.get('title', '')}**\n\n"
+                        md += f"   {news.get('content', '')}\n\n"
+                    else:
+                        source_tag = "📰 新闻" if news.get("source_type") == "news" else "💬 论坛"
+                        title = news.get('title', '')
+                        url = news.get('url', '')
+                        if url:
+                            md += f"{i}. {source_tag} [{title}]({url})\n"
+                        else:
+                            md += f"{i}. {source_tag} {title}\n"
+                        content = news.get('content', '')
+                        if content:
+                            md += f"   - {content[:200]}...\n\n"
             else:
                 md += "暂无新闻\n\n"
 

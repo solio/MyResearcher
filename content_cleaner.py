@@ -3,7 +3,7 @@
 用于去除搜索结果中的页面模板部分
 """
 import re
-from typing import List, Set
+from typing import List, Dict
 
 
 class ContentCleaner:
@@ -67,6 +67,41 @@ class ContentCleaner:
         # 重复的标点符号
         self.repeat_punctuation = r"[。！？；]{2,}"
 
+        # 乱码检测模式（大量奇怪字符）
+        self.gibberish_patterns = [
+            r"[^\x00-\x7F]{5,}",  # 大量连续非ASCII字符
+            r"[^一-鿿㐀-䶿a-zA-Z0-9\s，。！？；：""''（）【】、]{10,}",  # 大量非中英文数字标点
+        ]
+
+        # 低质量内容检测（纯数字、纯符号等）
+        self.low_quality_patterns = [
+            r"^[\d\s，。！？；：""''（）【】、]+$",  # 纯数字加标点
+            r"^[^一-鿿a-zA-Z]{20,}$",  # 基本没有有效文字
+        ]
+
+    def is_gibberish(self, text: str) -> bool:
+        """检测是否是乱码"""
+        for pattern in self.gibberish_patterns:
+            if re.search(pattern, text):
+                return True
+        return False
+
+    def is_low_quality(self, text: str) -> bool:
+        """检测是否是低质量内容"""
+        text_clean = text.strip()
+        for pattern in self.low_quality_patterns:
+            if re.match(pattern, text_clean):
+                return True
+
+        # 检查中文字符比例
+        if text_clean:
+            chinese_chars = len(re.findall(r"[一-鿿]", text_clean))
+            ratio = chinese_chars / len(text_clean)
+            if ratio < 0.1:  # 中文字符太少
+                return True
+
+        return False
+
     def is_template_content(self, text: str) -> bool:
         """
         判断是否是模板内容
@@ -78,9 +113,17 @@ class ContentCleaner:
             是否是模板内容
         """
         if not text or len(text.strip()) < 10:
-            return False
+            return True
 
         text_clean = text.strip()
+
+        # 检查乱码
+        if self.is_gibberish(text_clean):
+            return True
+
+        # 检查低质量
+        if self.is_low_quality(text_clean):
+            return True
 
         # 检查是否以多个链接形式出现
         separator_count = len(re.findall(self.separator_pattern, text_clean))
@@ -130,7 +173,7 @@ class ContentCleaner:
             para = para.strip()
 
             # 跳过太短的段落
-            if len(para) < 10:
+            if len(para) < 15:
                 continue
 
             # 检查是否是模板段落
@@ -168,9 +211,15 @@ class ContentCleaner:
         filtered = []
         for result in results:
             content = result.get("content", "")
+            title = result.get("title", "")
+
+            # 先检查标题是否是垃圾
+            if title and self.is_template_content(title):
+                continue
+
             if content:
                 cleaned_content = self.clean_content(content)
-                if len(cleaned_content) > 30:  # 过滤太短的内容
+                if len(cleaned_content) > 40:  # 过滤太短的内容
                     result["content"] = cleaned_content
                     filtered.append(result)
         return filtered
