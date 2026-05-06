@@ -162,7 +162,7 @@ class TavilySearchProvider(BaseSearchProvider):
                enable_cleanup: bool = True,
                max_pages: int = 3) -> List[Dict]:
         """
-        执行搜索（带重试、翻页、结果不足时的fallback）
+        执行搜索（带重试、结果不足时逐步放宽时间限制）
 
         Args:
             query: 搜索关键词
@@ -177,97 +177,63 @@ class TavilySearchProvider(BaseSearchProvider):
         # 使用默认的Tavily时间范围（2天）如果没有指定
         if time_range_days is None:
             time_range_days = self.tavily_time_range_days
-        """
-        执行搜索（带重试、翻页、结果不足时的fallback）
 
-        Args:
-            query: 搜索关键词
-            max_results: 返回结果数量
-            time_range_days: 时间范围（天数）
-            enable_cleanup: 是否清理内容
-            max_pages: 最大翻页次数
-
-        Returns:
-            搜索结果列表
-        """
         all_results = []
         last_error = None
 
-        # 策略1: 先用带时间限制的搜索
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                logger.info(f"搜索尝试 {attempt}/{self.max_retries}: {query[:60]}...")
-                result = self._search_once(
-                    query, max_results * 2,  # 多请求一些，留出过滤空间
-                    time_range_days=time_range_days
-                )
-                all_results = self._format_results(result)
+        # 定义逐步放宽的时间范围策略
+        time_ranges_to_try = [
+            time_range_days,  # 先用指定时间范围（默认2天）
+            7,  # 放宽到7天
+            30,  # 放宽到30天
+            None,  # 不限制时间
+        ]
 
-                # 清理内容
-                if enable_cleanup and self.content_cleaner:
-                    all_results = self.content_cleaner.filter_results(all_results)
+        # 提取核心搜索词
+        simple_query = " ".join(query.split()[:3])
 
+        # 对每个时间范围进行搜索
+        for idx, current_time_range in enumerate(time_ranges_to_try):
+            # 如果已经有足够结果了，就停止
+            if len(all_results) >= max_results:
                 break
 
-            except requests.exceptions.RequestException as e:
-                last_error = e
-                logger.warning(f"搜索失败（尝试 {attempt}/{self.max_retries}）: {e}")
-                if attempt < self.max_retries:
-                    wait_time = 2 ** attempt
-                    logger.info(f"等待 {wait_time} 秒后重试...")
-                    time.sleep(wait_time)
+            # 第一轮用完整query，后面可以用简化query
+            current_query = query if idx == 0 else simple_query
 
-        # 策略2: 如果结果太少，放宽时间限制再试一次
-        if len(all_results) < max_results // 2 and time_range_days:
-            logger.info(f"结果不足({len(all_results)}条)，放宽时间限制重新搜索...")
-            try:
-                result = self._search_once(
-                    query, max_results * 2,
-                    time_range_days=None  # 不限制时间
-                )
-                more_results = self._format_results(result)
+            time_desc = f"{current_time_range}天" if current_time_range else "不限时间"
+            logger.info(f"搜索策略{idx+1}/{len(time_ranges_to_try)}: {current_query[:40]}... ({time_desc})")
 
-                # 清理内容
-                if enable_cleanup and self.content_cleaner:
-                    more_results = self.content_cleaner.filter_results(more_results)
+            # 执行搜索（带重试）
+            for attempt in range(1, self.max_retries + 1):
+                try:
+                    result = self._search_once(
+                        current_query, max_results * 2,  # 多请求一些，留出过滤空间
+                        time_range_days=current_time_range
+                    )
+                    new_results = self._format_results(result)
 
-                # 合并去重
-                seen_urls = set(r.get("url", "") for r in all_results)
-                for r in more_results:
-                    if r.get("url", "") not in seen_urls:
-                        all_results.append(r)
-                        seen_urls.add(r.get("url", ""))
+                    # 清理内容
+                    if enable_cleanup and self.content_cleaner:
+                        new_results = self.content_cleaner.filter_results(new_results)
 
-                logger.info(f"放宽时间后新增 {len(more_results)} 条，共 {len(all_results)} 条")
+                    # 合并去重
+                    seen_urls = set(r.get("url", "") for r in all_results)
+                    for r in new_results:
+                        if r.get("url", "") not in seen_urls:
+                            all_results.append(r)
+                            seen_urls.add(r.get("url", ""))
 
-            except Exception as e:
-                logger.warning(f"放宽时间搜索失败: {e}")
+                    logger.info(f"本轮新增 {len(new_results)} 条，共 {len(all_results)} 条")
+                    break
 
-        # 策略3: 如果还是很少，尝试不带时间的简单query再搜索
-        if len(all_results) < max_results // 2:
-            logger.info(f"结果仍然不足，尝试简化搜索词...")
-            try:
-                # 提取核心关键词（取前几个词）
-                simple_query = " ".join(query.split()[:3])
-                result = self._search_once(
-                    simple_query, max_results * 3,
-                    time_range_days=None
-                )
-                more_results = self._format_results(result)
-
-                if enable_cleanup and self.content_cleaner:
-                    more_results = self.content_cleaner.filter_results(more_results)
-
-                seen_urls = set(r.get("url", "") for r in all_results)
-                for r in more_results:
-                    if r.get("url", "") not in seen_urls:
-                        all_results.append(r)
-                        seen_urls.add(r.get("url", ""))
-
-                logger.info(f"简化搜索后共 {len(all_results)} 条")
-
-            except Exception as e:
-                logger.warning(f"简化搜索失败: {e}")
+                except requests.exceptions.RequestException as e:
+                    last_error = e
+                    logger.warning(f"搜索失败（尝试 {attempt}/{self.max_retries}）: {e}")
+                    if attempt < self.max_retries:
+                        wait_time = 2 ** attempt
+                        logger.info(f"等待 {wait_time} 秒后重试...")
+                        time.sleep(wait_time)
 
         # 全部失败
         if not all_results and last_error:
