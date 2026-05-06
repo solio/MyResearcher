@@ -343,20 +343,32 @@ class SkillSearchProvider(BaseSearchProvider):
             搜索结果字典，失败返回None
         """
         try:
-            # 尝试导入skill模块
-            if str(self.search_engine_path) not in sys.path:
-                sys.path.insert(0, str(self.search_engine_path))
+            import os
+            # 保存当前工作目录
+            original_cwd = os.getcwd()
 
-            from skill.skill import search as skill_search
+            try:
+                # 切换到search-engine目录
+                os.chdir(str(self.search_engine_path))
 
-            # 调用skill搜索
-            result = skill_search(
-                query=query,
-                targeted=self.use_targeted,
-                use_mock=self.use_mock,
-            )
+                # 尝试导入skill模块
+                if str(self.search_engine_path) not in sys.path:
+                    sys.path.insert(0, str(self.search_engine_path))
 
-            return result
+                from skill.skill import search as skill_search
+
+                # 调用skill搜索
+                result = skill_search(
+                    query=query,
+                    targeted=self.use_targeted,
+                    use_mock=self.use_mock,
+                )
+
+                return result
+
+            finally:
+                # 恢复原始工作目录
+                os.chdir(original_cwd)
 
         except ImportError as e:
             logger.warning(f"无法导入skill模块: {e}")
