@@ -151,16 +151,15 @@ class StockResearcher:
         self.config = config
 
         # 初始化搜索提供者
-        search_provider = TavilySearchProvider(
-            api_key=config.TAVILY_API_KEY,
-            timeout=config.SEARCH_TIMEOUT,
-            max_retries=config.SEARCH_MAX_RETRIES
-        )
         self.searcher = StockSearcher(
-            search_provider,
-            config.ENABLE_FORUM_SEARCH,
-            config.SEARCH_TIME_RANGE_DAYS,
-            config.ENABLE_CONTENT_CLEANUP
+            search_provider_type=config.SEARCH_PROVIDER,
+            enable_forum=config.ENABLE_FORUM_SEARCH,
+            time_range_days=config.SEARCH_TIME_RANGE_DAYS,
+            enable_cleanup=config.ENABLE_CONTENT_CLEANUP,
+            tavily_api_key=config.TAVILY_API_KEY,
+            search_engine_path=config.SEARCH_ENGINE_PATH,
+            skill_use_targeted=config.SKILL_USE_TARGETED,
+            skill_use_mock=config.SKILL_USE_MOCK
         )
 
         # 初始化 LLM 提供者

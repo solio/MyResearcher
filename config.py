@@ -44,6 +44,13 @@ class Config:
         self.SEARCH_SCOPES = os.getenv("SEARCH_SCOPES", "news,blogs,forums").split(",")
         self.ENABLE_FORUM_SEARCH = os.getenv("ENABLE_FORUM_SEARCH", "true").lower() == "true"
 
+        # 搜索方式：skill（默认使用search-engine skill）或 tavily
+        self.SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "skill")
+        # skill搜索配置
+        self.SEARCH_ENGINE_PATH = os.getenv("SEARCH_ENGINE_PATH", "../search-engine")
+        self.SKILL_USE_TARGETED = os.getenv("SKILL_USE_TARGETED", "false").lower() == "true"
+        self.SKILL_USE_MOCK = os.getenv("SKILL_USE_MOCK", "false").lower() == "true"
+
         # ========== 搜索API配置 ==========
         self.SEARCH_TIMEOUT = int(os.getenv("SEARCH_TIMEOUT", "40"))  # 搜索超时时间（秒）
         self.SEARCH_MAX_RETRIES = int(os.getenv("SEARCH_MAX_RETRIES", "3"))  # 搜索最大重试次数

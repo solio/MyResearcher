@@ -5,6 +5,9 @@
 import requests
 import hashlib
 import time
+import sys
+import json
+from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Set
 from abc import ABC, abstractmethod
@@ -274,21 +277,190 @@ class TavilySearchProvider(BaseSearchProvider):
         return formatted
 
 
+class SkillSearchProvider(BaseSearchProvider):
+    """
+    Search-Engine Skill搜索提供者
+    使用../search-engine中的skill进行搜索
+    """
+
+    def __init__(
+        self,
+        search_engine_path: str = "../search-engine",
+        use_targeted: bool = False,
+        use_mock: bool = False,
+        enable_cleanup: bool = True,
+    ):
+        """
+        初始化Skill搜索提供者
+
+        Args:
+            search_engine_path: search-engine目录路径
+            use_targeted: 是否使用定向搜索（仅优质站点）
+            use_mock: 是否使用mock模式
+            enable_cleanup: 是否清理内容
+        """
+        self.search_engine_path = Path(search_engine_path).resolve()
+        self.use_targeted = use_targeted
+        self.use_mock = use_mock
+        self.enable_cleanup = enable_cleanup
+        self.content_cleaner = ContentCleaner() if enable_cleanup else None
+
+        # 确保search-engine目录存在
+        if not self.search_engine_path.exists():
+            logger.warning(f"search-engine目录不存在: {self.search_engine_path}")
+        else:
+            # 添加路径以便导入skill
+            if str(self.search_engine_path) not in sys.path:
+                sys.path.insert(0, str(self.search_engine_path))
+
+    def _search_with_skill(self, query: str) -> Optional[Dict]:
+        """
+        使用skill进行搜索
+
+        Args:
+            query: 搜索关键词
+
+        Returns:
+            搜索结果字典，失败返回None
+        """
+        try:
+            # 尝试导入skill模块
+            if str(self.search_engine_path) not in sys.path:
+                sys.path.insert(0, str(self.search_engine_path))
+
+            from skill.skill import search as skill_search
+
+            # 调用skill搜索
+            result = skill_search(
+                query=query,
+                targeted=self.use_targeted,
+                use_mock=self.use_mock,
+            )
+
+            return result
+
+        except ImportError as e:
+            logger.warning(f"无法导入skill模块: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"skill搜索失败: {e}")
+            return None
+
+    def search(
+        self,
+        query: str,
+        max_results: int = 5,
+        time_range_days: Optional[int] = 60,
+        enable_cleanup: bool = True,
+        max_pages: int = 3,
+    ) -> List[Dict]:
+        """
+        执行搜索
+
+        Args:
+            query: 搜索关键词
+            max_results: 返回结果数量
+            time_range_days: 时间范围（天数）- skill使用time_range参数，这里做兼容
+            enable_cleanup: 是否清理内容
+            max_pages: 最大翻页次数
+
+        Returns:
+            搜索结果列表
+        """
+        all_results = []
+
+        # 第一层：使用skill搜索
+        result = self._search_with_skill(query)
+        if result:
+            all_results = self._format_skill_results(result)
+
+            # 清理内容
+            if enable_cleanup and self.content_cleaner:
+                all_results = self.content_cleaner.filter_results(all_results)
+
+            logger.info(f"skill搜索返回 {len(all_results)} 条结果")
+
+        # 如果结果不足，尝试简化关键词
+        if len(all_results) < max_results // 2 and len(query.split()) > 2:
+            logger.info(f"结果不足，尝试简化关键词搜索")
+            simple_query = " ".join(query.split()[:3])
+            result_simple = self._search_with_skill(simple_query)
+            if result_simple:
+                more_results = self._format_skill_results(result_simple)
+                if enable_cleanup and self.content_cleaner:
+                    more_results = self.content_cleaner.filter_results(more_results)
+
+                # 合并去重
+                seen_urls = set(r.get("url", "") for r in all_results)
+                for r in more_results:
+                    if r.get("url", "") not in seen_urls:
+                        all_results.append(r)
+                        seen_urls.add(r.get("url", ""))
+
+        return all_results[:max_results]
+
+    def _format_skill_results(self, skill_result: Dict) -> List[Dict]:
+        """
+        格式化skill搜索结果
+
+        Args:
+            skill_result: skill返回的结果
+
+        Returns:
+            格式化后的结果列表
+        """
+        results = []
+        for item in skill_result.get("results", []):
+            results.append({
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "content": item.get("content", ""),
+                "published_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "source": item.get("domain", ""),
+                "score": item.get("score", 0.0),
+                "is_quality_site": item.get("is_quality_site", False),
+            })
+
+        return results
+
+
 class StockSearcher:
     """股票投研搜索器"""
 
-    def __init__(self, search_provider: BaseSearchProvider, enable_forum: bool = True,
-                 time_range_days: int = 60, enable_cleanup: bool = True):
+    def __init__(self, search_provider: BaseSearchProvider = None, enable_forum: bool = True,
+                 time_range_days: int = 60, enable_cleanup: bool = True,
+                 search_provider_type: str = "skill",
+                 tavily_api_key: str = "",
+                 search_engine_path: str = "../search-engine",
+                 skill_use_targeted: bool = False,
+                 skill_use_mock: bool = False):
         """
         初始化
 
         Args:
-            search_provider: 搜索提供者（可替换）
+            search_provider: 搜索提供者实例（优先使用）
             enable_forum: 是否启用论坛搜索
             time_range_days: 搜索时间范围（天数）
             enable_cleanup: 是否清理模板内容
+            search_provider_type: 搜索提供者类型 "skill" 或 "tavily"
+            tavily_api_key: Tavily API Key（tavily模式需要）
+            search_engine_path: search-engine目录路径（skill模式需要）
+            skill_use_targeted: skill是否使用定向搜索
+            skill_use_mock: skill是否使用mock模式
         """
-        self.provider = search_provider
+        if search_provider:
+            self.provider = search_provider
+        elif search_provider_type == "tavily":
+            self.provider = TavilySearchProvider(api_key=tavily_api_key)
+        else:
+            # 默认使用skill
+            self.provider = SkillSearchProvider(
+                search_engine_path=search_engine_path,
+                use_targeted=skill_use_targeted,
+                use_mock=skill_use_mock,
+                enable_cleanup=enable_cleanup,
+            )
+
         self.enable_forum = enable_forum
         self.time_range_days = time_range_days
         self.enable_cleanup = enable_cleanup
