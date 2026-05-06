@@ -10,197 +10,159 @@ class ContentCleaner:
     """内容清理器"""
 
     def __init__(self):
-        # 常见页面模板关键词（中文）
-        self.template_keywords_cn = [
-            "首页", "导航", "导航菜单", "顶部导航", "底部导航",
-            "登录", "注册", "登录注册", "退出登录",
-            "关于我们", "联系方式", "联系我们", "招聘信息", "加入我们",
+        # 明显是模板页面的URL关键词
+        self.template_url_keywords = [
+            "aboutus", "about-us", "about", "contact", "contactus",
+            "recruit", "zhaopin", "job", "careers", "joinus",
+            "sitemap", "link", "partner", "privacy", "terms",
+            "download", "app", "mobile", "copyright",
+            "index", "home", "default", "main",
+            "case", "cases", "example", "demo",
+            "intro", "introduction", "profile", "company",
+        ]
+
+        # 明显是新闻列表页的URL关键词
+        self.news_list_url_keywords = [
+            "/news", "/news-list", "/newslist", "/bulletin",
+            "/list", "/news_", "/news.", "-news",
+            "/activity", "/events",
+        ]
+
+        # 明显是模板页面的标题关键词
+        self.template_title_keywords = [
+            "公司简介", "公司介绍", "关于我们", "联系方式",
+            "招聘", "诚聘", "招贤纳士", "加入我们",
             "网站地图", "友情链接", "合作伙伴",
-            "版权声明", "版权所有", "侵权必究", "免责声明",
-            "隐私政策", "使用条款", "用户协议",
-            "客服热线", "客服电话", "联系电话",
-            "©", "Copyright", "All Rights Reserved",
-            "移动版", "电脑版", "APP下载", "客户端下载",
-            "扫一扫", "微信", "微博", "公众号",
-            "热门推荐", "热门搜索", "猜你喜欢", "相关推荐",
-            "热点排行", "新闻排行", "热门排行",
-            "下一页", "上一页", "第1页", "共N页",
-            "返回顶部", "回到顶部",
-            "广告", "广告位", "广告招商",
-            "公告", "通知", "系统公告",
-            "友情链接", "链接", "快速链接",
-            "热门搜索", "搜索热词", "热搜词",
+            "隐私政策", "用户协议", "使用条款",
+            "版权声明", "版权所有",
+            "APP下载", "客户端下载", "移动版",
+            "成功案例", "客户案例",
+            "产品中心", "产品介绍",
+            "官网", "首页", "网站主页",
         ]
 
-        # 常见页面模板关键词（英文）
-        self.template_keywords_en = [
-            "Home", "Navigation", "Menu", "Header", "Footer",
-            "Login", "Register", "Sign in", "Sign up",
-            "About us", "Contact us", "Careers", "Join us",
-            "Sitemap", "Links", "Partners",
-            "Privacy", "Terms", "Disclaimer",
-            "Copyright", "All rights reserved",
-            "Mobile", "Desktop", "Download", "App",
-            "WeChat", "Weibo",
-            "Advertisement", "Ad", "Sponsor",
-            "Next page", "Previous page", "Page",
-            "Back to top",
+        # 明显是新闻列表页的标题关键词
+        self.news_list_title_keywords = [
+            "最新新闻", "最新动态", "新闻列表", "新闻中心",
+            "最新消息", "最新资讯", "最新公告",
+            "新闻", "公告", "动态", "资讯",
         ]
 
-        # 常见URL模式（通常不是内容）
-        self.url_patterns = [
-            r"https?://[^\s]+",  # 完整URL
-            r"www\.[^\s]+",  # www开头的网址
-            r"[^\s]+\.(com|cn|net|org|io|co)[^\s]*",  # 常见域名
+        # 明显是模板内容的关键词组合
+        self.template_content_patterns = [
+            r"成立于\d{4}年",  # 公司成立时间（太常见于简介）
+            r"总部位于",  # 总部地址
+            r"专注于",  # 公司业务描述
+            r"国家规划布局",  # 资质描述
+            r"上市公司",  # 上市信息
+            r"战略投资",  # 投资信息
+            r"客户案例",  # 案例
+            r"运营中心",  # 运营信息
+            r"细分行业",  # 行业描述
+            r"企业文化",  # 文化
+            r"公司历程",  # 历程
+            r"投资者关系",  # IR
+            r"员工生活",  # 员工
         ]
 
-        # 常见导航链接模式（多个中文词用分隔符连接）
-        self.nav_patterns = [
-            r"^[\s\S]{0,100}(首页|股票|行情|数据|公告|研报)[\s\S]{0,100}$",
-            r"^[\s\S]{0,200}(首页|宏观|证券|金融|商业|全球市场|观点|地产)[\s\S]{0,200}$",
-            r"^[\s\S]{0,300}(新闻|博客|论坛|股吧|雪球|微博|微信)[\s\S]{0,300}$",
-        ]
-
-        # 短文本中的分隔符模式（"·" "|" "｜" 等）
-        self.separator_pattern = r"[·|｜┆┊┋┇]"
-
-        # 重复的标点符号
-        self.repeat_punctuation = r"[。！？；]{2,}"
-
-        # 乱码检测模式（大量奇怪字符）
+        # 乱码检测模式
         self.gibberish_patterns = [
-            r"[^\x00-\x7F]{5,}",  # 大量连续非ASCII字符
-            r"[^一-鿿㐀-䶿a-zA-Z0-9\s，。！？；：""''（）【】、]{10,}",  # 大量非中英文数字标点
+            r"[\|│┃┆┊┋┇┈┉┊┋]{3,}",  # 大量表格线条
+            r"[^\x00-\x7F一-鿿\w\s，。！？；：""''（）【】、]{5,}",  # 大量奇怪字符
         ]
 
-        # 低质量内容检测（纯数字、纯符号等）
-        self.low_quality_patterns = [
-            r"^[\d\s，。！？；：""''（）【】、]+$",  # 纯数字加标点
-            r"^[^一-鿿a-zA-Z]{20,}$",  # 基本没有有效文字
-        ]
+    def is_template_url(self, url: str) -> bool:
+        """检查URL是否是模板页面"""
+        if not url:
+            return False
+        url_lower = url.lower()
+        for keyword in self.template_url_keywords:
+            if keyword in url_lower:
+                return True
+        return False
+
+    def is_template_title(self, title: str) -> bool:
+        """检查标题是否是模板页面"""
+        if not title:
+            return False
+        for keyword in self.template_title_keywords:
+            if keyword in title:
+                return True
+        return False
+
+    def is_news_list_url(self, url: str) -> bool:
+        """检查URL是否是新闻列表页"""
+        if not url:
+            return False
+        url_lower = url.lower()
+        for keyword in self.news_list_url_keywords:
+            if keyword in url_lower:
+                return True
+        return False
+
+    def is_news_list_title(self, title: str) -> bool:
+        """检查标题是否是新闻列表页"""
+        if not title:
+            return False
+        for keyword in self.news_list_title_keywords:
+            # 只有当标题主要就是这些关键词时才认为是列表页
+            # 避免把"XX公司最新新闻"这种单篇新闻标题误判
+            if title.strip() == keyword or title.strip().endswith(keyword) or title.strip().startswith(keyword):
+                return True
+        return False
 
     def is_gibberish(self, text: str) -> bool:
         """检测是否是乱码"""
+        if not text:
+            return False
         for pattern in self.gibberish_patterns:
             if re.search(pattern, text):
                 return True
         return False
 
-    def is_low_quality(self, text: str) -> bool:
-        """检测是否是低质量内容"""
-        text_clean = text.strip()
-        for pattern in self.low_quality_patterns:
-            if re.match(pattern, text_clean):
-                return True
+    def is_likely_template_content(self, content: str) -> bool:
+        """检查内容是否像模板"""
+        if not content:
+            return False
 
-        # 检查中文字符比例
-        if text_clean:
-            chinese_chars = len(re.findall(r"[一-鿿]", text_clean))
-            ratio = chinese_chars / len(text_clean)
-            if ratio < 0.1:  # 中文字符太少
-                return True
-
-        return False
-
-    def is_template_content(self, text: str) -> bool:
-        """
-        判断是否是模板内容
-
-        Args:
-            text: 输入文本
-
-        Returns:
-            是否是模板内容
-        """
-        if not text or len(text.strip()) < 10:
-            return True
-
-        text_clean = text.strip()
-
-        # 检查乱码
-        if self.is_gibberish(text_clean):
-            return True
-
-        # 检查低质量
-        if self.is_low_quality(text_clean):
-            return True
-
-        # 检查是否以多个链接形式出现
-        separator_count = len(re.findall(self.separator_pattern, text_clean))
-        if separator_count >= 3 and len(text_clean) < 200:
-            return True
-
-        # 检查是否包含多个模板关键词
-        template_count = 0
-        for keyword in self.template_keywords_cn + self.template_keywords_en:
-            if keyword in text_clean:
-                template_count += 1
-                if template_count >= 3:
+        # 检查是否包含多个模板内容模式
+        pattern_count = 0
+        for pattern in self.template_content_patterns:
+            if re.search(pattern, content):
+                pattern_count += 1
+                if pattern_count >= 2:  # 2个及以上模板特征
                     return True
 
-        # 检查是否匹配导航模式
-        for pattern in self.nav_patterns:
-            if re.match(pattern, text_clean):
-                return True
-
-        # 检查是否大部分是URL
-        url_count = 0
-        for pattern in self.url_patterns:
-            url_count += len(re.findall(pattern, text_clean))
-        if url_count >= 3:
-            return True
-
         return False
 
-    def clean_content(self, content: str) -> str:
+    def has_valid_news_content(self, title: str, content: str) -> bool:
         """
-        清理内容，去除模板部分
-
-        Args:
-            content: 原始内容
-
-        Returns:
-            清理后的内容
+        检查是否有有效的单篇新闻内容
         """
-        if not content:
-            return ""
+        # 排除只是列表页的情况（标题只有"最新新闻"等，但没有具体新闻内容）
+        if (self.is_news_list_title(title) and len(content) < 300):
+            return False
 
-        # 1. 先按段落分割
-        paragraphs = content.split("\n")
-        cleaned_paragraphs = []
+        # 如果有具体的新闻特征词（不是只在标题里说"新闻"）
+        news_indicators = ["公告", "研报", "分析", "业绩", "营收", "利润", "亏损", "涨停", "跌停"]
+        # 更强的新闻特征：包含具体数字或年份
+        strong_indicators = [r"\d{4}年", r"营收\d", r"利润\d", r"亏损\d", r"\d亿元", r"\d万"]
 
-        for para in paragraphs:
-            para = para.strip()
+        # 检查强特征
+        for pattern in strong_indicators:
+            if re.search(pattern, title) or re.search(pattern, content):
+                return True
 
-            # 跳过太短的段落
-            if len(para) < 15:
-                continue
+        # 检查普通特征，但要确保不是只有"新闻"这个词
+        for indicator in news_indicators:
+            if indicator in title or indicator in content:
+                return True
 
-            # 检查是否是模板段落
-            if self.is_template_content(para):
-                continue
-
-            cleaned_paragraphs.append(para)
-
-        # 2. 重新组合段落
-        cleaned_content = "\n".join(cleaned_paragraphs)
-
-        # 3. 清理URL
-        for pattern in self.url_patterns:
-            cleaned_content = re.sub(pattern, " [链接] ", cleaned_content)
-
-        # 4. 清理重复标点
-        cleaned_content = re.sub(self.repeat_punctuation, "。", cleaned_content)
-
-        # 5. 清理多余空白
-        cleaned_content = re.sub(r"\s{3,}", "\n\n", cleaned_content)
-        cleaned_content = re.sub(r"\n{3,}", "\n\n", cleaned_content)
-
-        return cleaned_content.strip()
+        return False
 
     def filter_results(self, results: List[Dict]) -> List[Dict]:
         """
-        过滤搜索结果（宽松策略）
+        过滤搜索结果（智能策略）
 
         Args:
             results: 原始搜索结果列表
@@ -209,21 +171,48 @@ class ContentCleaner:
             过滤后的结果列表
         """
         filtered = []
+        seen_urls = set()
+
         for result in results:
-            content = result.get("content", "")
+            url = result.get("url", "")
             title = result.get("title", "")
+            content = result.get("content", "")
 
-            # 基本检查：标题和内容都不能为空
-            if not title and not content:
+            # 去重
+            if url and url in seen_urls:
+                continue
+            if url:
+                seen_urls.add(url)
+
+            # 基本检查：标题和内容都为空的跳过
+            if not title.strip() and not content.strip():
                 continue
 
-            # 内容长度检查（降低阈值）
-            if content and len(content.strip()) < 20:
+            # 内容太短的跳过
+            if len(content.strip()) < 30 and len(title.strip()) < 10:
                 continue
 
-            # 直接保留结果，只做最基本清理
+            # 明显是乱码的跳过
+            if self.is_gibberish(content) and self.is_gibberish(title):
+                continue
+
+            # 先检查是否有明确的单篇新闻特征
+            has_news = self.has_valid_news_content(title, content)
+
+            # 明显是模板页面且没有新闻特征的跳过
+            if (self.is_template_url(url) or self.is_template_title(title)) and not has_news:
+                continue
+
+            # 新闻列表页且没有新闻特征的跳过
+            if (self.is_news_list_url(url) or self.is_news_list_title(title)) and not has_news:
+                continue
+
+            # 内容较短且像模板且没有新闻特征的跳过
+            if self.is_likely_template_content(content) and len(content) < 200 and not has_news:
+                continue
+
+            # 简单清理多余空白
             if content:
-                # 简单清理多余空白
                 cleaned_content = re.sub(r"\s+", " ", content).strip()
                 result["content"] = cleaned_content
 
