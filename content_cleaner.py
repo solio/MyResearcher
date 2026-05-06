@@ -200,7 +200,7 @@ class ContentCleaner:
 
     def filter_results(self, results: List[Dict]) -> List[Dict]:
         """
-        过滤搜索结果，去除模板内容
+        过滤搜索结果（宽松策略）
 
         Args:
             results: 原始搜索结果列表
@@ -213,13 +213,20 @@ class ContentCleaner:
             content = result.get("content", "")
             title = result.get("title", "")
 
-            # 先检查标题是否是垃圾
-            if title and self.is_template_content(title):
+            # 基本检查：标题和内容都不能为空
+            if not title and not content:
                 continue
 
+            # 内容长度检查（降低阈值）
+            if content and len(content.strip()) < 20:
+                continue
+
+            # 直接保留结果，只做最基本清理
             if content:
-                cleaned_content = self.clean_content(content)
-                if len(cleaned_content) > 40:  # 过滤太短的内容
-                    result["content"] = cleaned_content
-                    filtered.append(result)
+                # 简单清理多余空白
+                cleaned_content = re.sub(r"\s+", " ", content).strip()
+                result["content"] = cleaned_content
+
+            filtered.append(result)
+
         return filtered

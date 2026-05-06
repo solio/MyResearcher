@@ -34,7 +34,7 @@ class Config:
         self.CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "180"))
 
         # ========== 股票列表配置 ==========
-        self.STOCK_LIST = self._parse_stock_list(os.getenv("STOCK_LIST", "601012|隆基绿能,003000|劲仔食品,603039|泛微网络,002407|多氟多,601888|中国中免,002891|中宠股份,603899|晨光股份,601966|玲珑轮胎,002352|顺丰控股,600887|伊利股份 ,601995|中金公司,603711|香飘飘,601636|旗滨集团"))
+        self.STOCK_LIST = self._parse_stock_list(os.getenv("STOCK_LIST", "601012|隆基绿能,003000|劲仔食品,603039|泛微网络,002407|多氟多,601888|中国中免,002891|中宠股份,603899|晨光股份,601966|玲珑轮胎,002352|顺丰控股,600887|伊利股份,601995|中金公司,603711|香飘飘,601636|旗滨集团"))
 
         # ========== 行业列表配置 ==========
         self.INDUSTRY_LIST = self._parse_industry_list(os.getenv("INDUSTRY_LIST", "光伏行业|玻璃行业|房地产市场|锂电行业|it软件开发行业|休闲零食"))
@@ -45,14 +45,14 @@ class Config:
         self.ENABLE_FORUM_SEARCH = os.getenv("ENABLE_FORUM_SEARCH", "true").lower() == "true"
 
         # 搜索方式：skill（默认使用search-engine skill）或 tavily
-        self.SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "skill")
+        self.SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "tavily")
         # skill搜索配置
         self.SEARCH_ENGINE_PATH = os.getenv("SEARCH_ENGINE_PATH", "../search-engine")
         self.SKILL_USE_TARGETED = os.getenv("SKILL_USE_TARGETED", "false").lower() == "true"
         self.SKILL_USE_MOCK = os.getenv("SKILL_USE_MOCK", "false").lower() == "true"
 
         # Tavily搜索配置
-        self.TAVILY_SEARCH_TIME_RANGE_DAYS = int(os.getenv("TAVILY_SEARCH_TIME_RANGE_DAYS", "2"))
+        self.TAVILY_SEARCH_TIME_RANGE_DAYS = int(os.getenv("TAVILY_SEARCH_TIME_RANGE_DAYS", "7"))
 
         # ========== 搜索API配置 ==========
         self.SEARCH_TIMEOUT = int(os.getenv("SEARCH_TIMEOUT", "40"))  # 搜索超时时间（秒）
@@ -61,7 +61,9 @@ class Config:
         self.LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))  # LLM最大重试次数
 
         # ========== 搜索过滤配置 ==========
-        self.SEARCH_TIME_RANGE_DAYS = int(os.getenv("SEARCH_TIME_RANGE_DAYS", "60"))  # 搜索时间范围：默认2个月
+        # 搜索时间范围：None表示用各provider默认值（Tavily用2天，skill用60天）
+        time_range_env = os.getenv("SEARCH_TIME_RANGE_DAYS")
+        self.SEARCH_TIME_RANGE_DAYS = int(time_range_env) if time_range_env and time_range_env.strip() else None
         self.SEARCH_MIN_CONTENT_LENGTH = int(os.getenv("SEARCH_MIN_CONTENT_LENGTH", "50"))  # 内容最小长度
         self.SEARCH_MAX_PAGES = int(os.getenv("SEARCH_MAX_PAGES", "3"))  # 最大翻页次数
         self.ENABLE_CONTENT_CLEANUP = os.getenv("ENABLE_CONTENT_CLEANUP", "true").lower() == "true"  # 是否清理模板内容

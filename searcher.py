@@ -130,22 +130,16 @@ class TavilySearchProvider(BaseSearchProvider):
                      search_depth: str = "basic",
                      include_answer: bool = False,
                      time_range_days: Optional[int] = None) -> Dict:
-        """执行一次搜索"""
+        """执行一次搜索（注意：Tavily对中文搜索不支持after:日期语法，直接搜索）"""
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}"
         }
 
-        # 构建查询
-        full_query = query
-        if time_range_days:
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=time_range_days)
-            date_str = f" after:{start_date.strftime('%Y-%m-%d')}"
-            full_query = query + date_str
-
+        # 不使用日期后缀，Tavily对中文搜索的日期语法支持不好
+        # 信任Tavily会返回较新的结果
         payload = {
-            "query": full_query,
+            "query": query,
             "search_depth": search_depth,
             "max_results": max_results,
             "include_answer": include_answer,
@@ -162,54 +156,40 @@ class TavilySearchProvider(BaseSearchProvider):
                enable_cleanup: bool = True,
                max_pages: int = 3) -> List[Dict]:
         """
-        执行搜索（带重试、结果不足时逐步放宽时间限制）
+        执行搜索（带重试）
 
         Args:
             query: 搜索关键词
             max_results: 返回结果数量
-            time_range_days: 时间范围（天数，None则使用默认的tavily_time_range_days）
+            time_range_days: （不再使用，保留兼容）
             enable_cleanup: 是否清理内容
             max_pages: 最大翻页次数
 
         Returns:
             搜索结果列表
         """
-        # 使用默认的Tavily时间范围（2天）如果没有指定
-        if time_range_days is None:
-            time_range_days = self.tavily_time_range_days
-
         all_results = []
         last_error = None
 
-        # 定义逐步放宽的时间范围策略
-        time_ranges_to_try = [
-            time_range_days,  # 先用指定时间范围（默认2天）
-            7,  # 放宽到7天
-            30,  # 放宽到30天
-            None,  # 不限制时间
+        # 搜索策略：先用完整query，再用简化query
+        queries_to_try = [
+            query,  # 完整查询
+            " ".join(query.split()[:3]),  # 简化查询（前3个词）
         ]
 
-        # 提取核心搜索词
-        simple_query = " ".join(query.split()[:3])
-
-        # 对每个时间范围进行搜索
-        for idx, current_time_range in enumerate(time_ranges_to_try):
+        # 尝试每个查询策略
+        for idx, current_query in enumerate(queries_to_try):
             # 如果已经有足够结果了，就停止
             if len(all_results) >= max_results:
                 break
 
-            # 第一轮用完整query，后面可以用简化query
-            current_query = query if idx == 0 else simple_query
-
-            time_desc = f"{current_time_range}天" if current_time_range else "不限时间"
-            logger.info(f"搜索策略{idx+1}/{len(time_ranges_to_try)}: {current_query[:40]}... ({time_desc})")
+            logger.info(f"搜索策略{idx+1}/{len(queries_to_try)}: {current_query[:40]}...")
 
             # 执行搜索（带重试）
             for attempt in range(1, self.max_retries + 1):
                 try:
                     result = self._search_once(
-                        current_query, max_results * 2,  # 多请求一些，留出过滤空间
-                        time_range_days=current_time_range
+                        current_query, max_results * 2  # 多请求一些，留出过滤空间
                     )
                     new_results = self._format_results(result)
 
@@ -425,7 +405,7 @@ class StockSearcher:
     """股票投研搜索器"""
 
     def __init__(self, search_provider: BaseSearchProvider = None, enable_forum: bool = True,
-                 time_range_days: int = 60, enable_cleanup: bool = True,
+                 time_range_days: int = None, enable_cleanup: bool = True,
                  search_provider_type: str = "skill",
                  tavily_api_key: str = "",
                  tavily_time_range_days: int = 2,
