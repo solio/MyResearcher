@@ -108,7 +108,8 @@ class BaseSearchProvider(ABC):
 class TavilySearchProvider(BaseSearchProvider):
     """Tavily搜索提供者"""
 
-    def __init__(self, api_key: str, timeout: int = 40, max_retries: int = 3):
+    def __init__(self, api_key: str, timeout: int = 40, max_retries: int = 3,
+                 tavily_time_range_days: int = 2):
         """
         初始化
 
@@ -116,10 +117,12 @@ class TavilySearchProvider(BaseSearchProvider):
             api_key: Tavily API Key
             timeout: 超时时间（秒）
             max_retries: 最大重试次数
+            tavily_time_range_days: Tavily搜索的时间范围（天数，默认2天）
         """
         self.api_key = api_key
         self.timeout = timeout
         self.max_retries = max_retries
+        self.tavily_time_range_days = tavily_time_range_days
         self.base_url = "https://api.tavily.com/search"
         self.content_cleaner = ContentCleaner()
 
@@ -155,9 +158,25 @@ class TavilySearchProvider(BaseSearchProvider):
         return response.json()
 
     def search(self, query: str, max_results: int = 5,
-               time_range_days: Optional[int] = 60,
+               time_range_days: Optional[int] = None,
                enable_cleanup: bool = True,
                max_pages: int = 3) -> List[Dict]:
+        """
+        执行搜索（带重试、翻页、结果不足时的fallback）
+
+        Args:
+            query: 搜索关键词
+            max_results: 返回结果数量
+            time_range_days: 时间范围（天数，None则使用默认的tavily_time_range_days）
+            enable_cleanup: 是否清理内容
+            max_pages: 最大翻页次数
+
+        Returns:
+            搜索结果列表
+        """
+        # 使用默认的Tavily时间范围（2天）如果没有指定
+        if time_range_days is None:
+            time_range_days = self.tavily_time_range_days
         """
         执行搜索（带重试、翻页、结果不足时的fallback）
 
@@ -431,6 +450,7 @@ class StockSearcher:
                  time_range_days: int = 60, enable_cleanup: bool = True,
                  search_provider_type: str = "skill",
                  tavily_api_key: str = "",
+                 tavily_time_range_days: int = 2,
                  search_engine_path: str = "../search-engine",
                  skill_use_targeted: bool = False,
                  skill_use_mock: bool = False):
@@ -444,6 +464,7 @@ class StockSearcher:
             enable_cleanup: 是否清理模板内容
             search_provider_type: 搜索提供者类型 "skill" 或 "tavily"
             tavily_api_key: Tavily API Key（tavily模式需要）
+            tavily_time_range_days: Tavily搜索的时间范围（天数，默认2天）
             search_engine_path: search-engine目录路径（skill模式需要）
             skill_use_targeted: skill是否使用定向搜索
             skill_use_mock: skill是否使用mock模式
@@ -451,7 +472,10 @@ class StockSearcher:
         if search_provider:
             self.provider = search_provider
         elif search_provider_type == "tavily":
-            self.provider = TavilySearchProvider(api_key=tavily_api_key)
+            self.provider = TavilySearchProvider(
+                api_key=tavily_api_key,
+                tavily_time_range_days=tavily_time_range_days
+            )
         else:
             # 默认使用skill
             self.provider = SkillSearchProvider(

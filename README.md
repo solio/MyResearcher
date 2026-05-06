@@ -52,6 +52,8 @@ SKILL_USE_MOCK=false
 
 # 或使用 Tavily API（备选）
 # SEARCH_PROVIDER=tavily
+# Tavily搜索的时间范围（天数，默认2天，保证新闻时效性）
+# TAVILY_SEARCH_TIME_RANGE_DAYS=2
 
 # 关注的股票列表
 STOCK_LIST=601012|隆基绿能,002407|多氟多,603039|泛微,003000|劲仔

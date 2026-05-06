@@ -51,6 +51,9 @@ class Config:
         self.SKILL_USE_TARGETED = os.getenv("SKILL_USE_TARGETED", "false").lower() == "true"
         self.SKILL_USE_MOCK = os.getenv("SKILL_USE_MOCK", "false").lower() == "true"
 
+        # Tavily搜索配置
+        self.TAVILY_SEARCH_TIME_RANGE_DAYS = int(os.getenv("TAVILY_SEARCH_TIME_RANGE_DAYS", "2"))
+
         # ========== 搜索API配置 ==========
         self.SEARCH_TIMEOUT = int(os.getenv("SEARCH_TIMEOUT", "40"))  # 搜索超时时间（秒）
         self.SEARCH_MAX_RETRIES = int(os.getenv("SEARCH_MAX_RETRIES", "3"))  # 搜索最大重试次数

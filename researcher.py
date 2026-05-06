@@ -157,10 +157,14 @@ class StockResearcher:
             time_range_days=config.SEARCH_TIME_RANGE_DAYS,
             enable_cleanup=config.ENABLE_CONTENT_CLEANUP,
             tavily_api_key=config.TAVILY_API_KEY,
+            tavily_time_range_days=config.TAVILY_SEARCH_TIME_RANGE_DAYS,
             search_engine_path=config.SEARCH_ENGINE_PATH,
             skill_use_targeted=config.SKILL_USE_TARGETED,
             skill_use_mock=config.SKILL_USE_MOCK
         )
+
+        # 记录使用的搜索提供者类型，用于区分数据保存方式
+        self.search_provider_type = config.SEARCH_PROVIDER
 
         # 初始化 LLM 提供者
         llm_provider = DeepSeekLLMProvider(
@@ -399,17 +403,23 @@ class StockResearcher:
         """
         output_dir = self.config.get_output_dir_for_date(self.today_str)
 
-        # 1. 保存原始数据
-        data_file = os.path.join(output_dir, f"{self.now_str}-数据.json")
-        data = {
-            "date": self.today_str,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "results": [r.to_dict() for r in results]
-        }
-        with open(data_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        # 使用Tavily搜索时才保存原始数据（search-engine的数据在本地其他目录已记录）
+        if self.search_provider_type == "tavily":
+            # 保存原始数据
+            data_file = os.path.join(output_dir, f"{self.now_str}-数据.json")
+            data = {
+                "date": self.today_str,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "results": [r.to_dict() for r in results],
+                "search_provider": "tavily"
+            }
+            with open(data_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.info(f"原始数据已保存: {data_file}")
+        else:
+            logger.info("使用search-engine搜索，原始数据已在search-engine目录记录，此处仅保存纪要")
 
-        # 2. 保存投研纪要
+        # 保存投研纪要（始终保存）
         md_file = os.path.join(output_dir, f"{self.now_str}-纪要.md")
         md_content = self._generate_markdown_report(results)
         with open(md_file, "w", encoding="utf-8") as f:
