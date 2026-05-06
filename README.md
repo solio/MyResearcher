@@ -7,7 +7,9 @@
 - 定时搜索个股热门新闻和话题（默认每3小时）
 - 定时搜索行业热门新闻和话题
 - **雪球、股吧等论坛搜索与情绪分析**
-- 基于 Tavily API 的多源搜索（新闻、博客、论坛等）
+- **双搜索引擎支持**：
+  - search-engine skill（默认，本地搜索引擎 + 智能过滤）
+  - Tavily API（备选，多源搜索）
 - 基于 DeepSeek API 的智能分析（价值投资 + 逆向思维）
 - **新闻去重，避免重复分析浪费 Token**
 - **与上一日对比，内容相似时跳过分析**
@@ -38,8 +40,18 @@ cp .env.example .env
 # DeepSeek API 配置
 DEEPSEEK_API_KEY=your_deepseek_api_key_here
 
-# Tavily 搜索 API 配置
+# Tavily 搜索 API 配置（使用tavily搜索时需要）
 TAVILY_API_KEY=your_tavily_api_key_here
+
+# ========== 搜索方式选择 ==========
+# 使用 search-engine skill（默认，推荐）
+SEARCH_PROVIDER=skill
+SEARCH_ENGINE_PATH=../search-engine
+SKILL_USE_TARGETED=false
+SKILL_USE_MOCK=false
+
+# 或使用 Tavily API（备选）
+# SEARCH_PROVIDER=tavily
 
 # 关注的股票列表
 STOCK_LIST=601012|隆基绿能,002407|多氟多,603039|泛微,003000|劲仔
