@@ -28,6 +28,7 @@ class Config:
         self.DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
         self.DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
 
+        # 备用key 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
         self.TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "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")
 
         # ========== 定时任务配置 ==========

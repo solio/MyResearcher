@@ -391,6 +391,94 @@ class StockResearcher:
         self.results = all_results
         return all_results
 
+    def search_only(self) -> List[Dict]:
+        """
+        仅搜索数据，不做分析
+
+        Returns:
+            搜索结果列表（纯数据，不包含分析内容）
+        """
+        logger.info("=" * 60)
+        logger.info("开始搜索任务（仅搜索，不分析）")
+        logger.info("=" * 60)
+
+        all_results = []
+
+        # 搜索个股新闻
+        logger.info("--- 搜索个股 ---")
+        for stock in self.config.STOCK_LIST:
+            try:
+                target_name = f"{stock['name']}({stock['code']})"
+                logger.info(f"正在搜索: {target_name}")
+                news_list = self.searcher.search_stock_news(
+                    stock['code'],
+                    stock['name'],
+                    max_results=self.config.SEARCH_RESULT_COUNT
+                )
+                all_results.append({
+                    "target_type": "stock",
+                    "target_name": target_name,
+                    "news_list": news_list,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+            except Exception as e:
+                logger.error(f"搜索股票异常: {stock}, error={e}", exc_info=True)
+                # 即使失败也继续下一个
+
+        # 搜索行业新闻
+        logger.info("--- 搜索行业 ---")
+        for industry in self.config.INDUSTRY_LIST:
+            try:
+                logger.info(f"正在搜索: {industry}")
+                news_list = self.searcher.search_industry_news(
+                    industry,
+                    max_results=self.config.SEARCH_RESULT_COUNT
+                )
+                all_results.append({
+                    "target_type": "industry",
+                    "target_name": industry,
+                    "news_list": news_list,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+            except Exception as e:
+                logger.error(f"搜索行业异常: {industry}, error={e}", exc_info=True)
+                # 即使失败也继续下一个
+
+        logger.info(f"搜索完成，共获取 {len(all_results)} 个目标的数据")
+        return all_results
+
+    def save_search_data(self, search_results: List[Dict]) -> str:
+        """
+        仅保存搜索数据（不生成纪要）
+
+        Args:
+            search_results: 搜索结果列表
+
+        Returns:
+            保存的数据文件路径
+        """
+        output_dir = self.config.get_output_dir_for_date(self.today_str)
+
+        # 保存原始数据
+        data_file = os.path.join(output_dir, f"{self.now_str}-搜索数据.json")
+        data = {
+            "date": self.today_str,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "results": search_results,
+            "search_provider": self.search_provider_type,
+            "mode": "searchOnly"
+        }
+        with open(data_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        logger.info(f"搜索数据已保存: {data_file}")
+        logger.info(f"  - 包含 {len(search_results)} 个目标")
+        for result in search_results:
+            count = len(result.get('news_list', []))
+            logger.info(f"    - {result['target_name']}: {count} 条新闻")
+
+        return data_file
+
     def save_results(self, results: List[ResearchResult]) -> str:
         """
         保存研究结果到文件

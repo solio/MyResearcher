@@ -189,7 +189,7 @@ class TavilySearchProvider(BaseSearchProvider):
             for attempt in range(1, self.max_retries + 1):
                 try:
                     result = self._search_once(
-                        current_query, max_results * 2  # 多请求一些，留出过滤空间
+                        current_query, max_results * 4  # 请求更多结果（过滤会过滤掉很多行情页）
                     )
                     new_results = self._format_results(result)
 
@@ -490,27 +490,37 @@ class StockSearcher:
         Returns:
             新闻列表
         """
-        # 更多query组合搜索新闻
+        # 更多query组合搜索新闻 - 增加更多新闻性查询，减少行情页
         news_queries = [
             f"{stock_name} {stock_code} 最新新闻",
             f"{stock_name} 股票分析 研报",
             f"{stock_name} 最新消息 公告",
             f"{stock_name} 股市 动态",
             f"{stock_name} 行业 资讯",
+            f"{stock_name} 公告 新闻",
+            f"{stock_name} 2025 2026 新闻",
+            f"{stock_name} 财报 业绩 营收",
+            f"{stock_name} 新闻 site:10jqka.com.cn",
+            f"{stock_name} 新闻 site:eastmoney.com",
+            # 新增：专门针对券商研报的搜索
+            f"{stock_name} {stock_code} 券商研报",
+            f"{stock_name} {stock_code} 研报 site:finance.sina.com.cn",
+            f"{stock_name} {stock_code} 研报 site:stock.finance.sina.com.cn",
         ]
 
-        all_news = self._multi_query_search(news_queries, max_results_per_query=5)
+        all_news = self._multi_query_search(news_queries, max_results_per_query=8)  # 增加单query结果量
 
-        # 更多query组合搜索论坛
+        # 更多query组合搜索论坛 - 更具体的帖子查询，避免列表页
         if self.enable_forum:
             forum_queries = [
-                f"site:xueqiu.com {stock_name} {stock_code}",
-                f"site:guba.eastmoney.com {stock_name} {stock_code}",
-                f"{stock_name} 雪球 讨论",
-                f"{stock_name} 股吧 热议",
-                f"{stock_name} 股民 讨论",
+                f"site:xueqiu.com {stock_name} {stock_code} 分析",
+                f"site:xueqiu.com {stock_name} {stock_code} 讨论",
+                f"site:guba.eastmoney.com {stock_name} {stock_code} 热议",
+                f"{stock_name} 雪球 分析",
+                f"{stock_name} 股吧 讨论",
+                f"{stock_name} 股民 分析",
             ]
-            forum_results = self._multi_query_search(forum_queries, max_results_per_query=4)
+            forum_results = self._multi_query_search(forum_queries, max_results_per_query=6)  # 增加单query结果量
             for r in forum_results:
                 r["source_type"] = "forum"
                 all_news.append(r)
@@ -523,6 +533,25 @@ class StockSearcher:
         # 最后整体去重
         final_deduplicator = NewsDeduplicator()
         all_news = final_deduplicator.deduplicate(all_news)
+
+        # 记录过滤前后的数据量
+        logger.info(f"{stock_name}({stock_code}) 最终有效新闻数: {len(all_news)}")
+
+        # 如果结果太少，降低标准，放宽一些过滤条件 - 接受部分质量一般的数据
+        if len(all_news) < 5:
+            logger.info(f"{stock_name}({stock_code}) 新闻不足，尝试放宽搜索条件")
+            # 用更简单的query再搜索一次，不做严格过滤
+            backup_queries = [
+                f"{stock_name} {stock_code}",
+                f"{stock_name}",
+            ]
+            backup_results = self._multi_query_search(backup_queries, max_results_per_query=10)
+            for r in backup_results:
+                if "source_type" not in r:
+                    r["source_type"] = "news"
+                if not final_deduplicator.is_duplicate(r):
+                    final_deduplicator.add(r)
+                    all_news.append(r)
 
         # 如果结果仍然为空，添加一个标记条目
         if not all_news:
@@ -558,9 +587,12 @@ class StockSearcher:
             f"{industry_name} 发展趋势",
             f"{industry_name} 市场 动态",
             f"{industry_name} 投资 资讯",
+            f"{industry_name} 行业资讯 2025 2026",
+            f"{industry_name} 新闻 site:10jqka.com.cn",
+            f"{industry_name} 新闻 site:eastmoney.com",
         ]
 
-        all_news = self._multi_query_search(news_queries, max_results_per_query=5)
+        all_news = self._multi_query_search(news_queries, max_results_per_query=8)  # 增加单query结果量
 
         # 搜索论坛讨论
         if self.enable_forum:
@@ -569,7 +601,7 @@ class StockSearcher:
                 f"{industry_name} 投资讨论",
                 f"{industry_name} 股吧 热议",
             ]
-            forum_results = self._multi_query_search(forum_queries, max_results_per_query=4)
+            forum_results = self._multi_query_search(forum_queries, max_results_per_query=6)  # 增加单query结果量
             for r in forum_results:
                 r["source_type"] = "forum"
                 all_news.append(r)
@@ -582,6 +614,24 @@ class StockSearcher:
         # 最后整体去重
         final_deduplicator = NewsDeduplicator()
         all_news = final_deduplicator.deduplicate(all_news)
+
+        # 记录过滤前后的数据量
+        logger.info(f"{industry_name} 最终有效新闻数: {len(all_news)}")
+
+        # 如果结果太少，放宽条件补充
+        if len(all_news) < 5:
+            logger.info(f"{industry_name} 新闻不足，尝试放宽搜索条件")
+            backup_queries = [
+                f"{industry_name} 行业",
+                f"{industry_name}",
+            ]
+            backup_results = self._multi_query_search(backup_queries, max_results_per_query=10)
+            for r in backup_results:
+                if "source_type" not in r:
+                    r["source_type"] = "news"
+                if not final_deduplicator.is_duplicate(r):
+                    final_deduplicator.add(r)
+                    all_news.append(r)
 
         # 如果结果仍然为空，添加一个标记条目
         if not all_news:
