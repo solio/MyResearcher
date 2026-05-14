@@ -160,7 +160,8 @@ class StockResearcher:
             tavily_time_range_days=config.TAVILY_SEARCH_TIME_RANGE_DAYS,
             search_engine_path=config.SEARCH_ENGINE_PATH,
             skill_use_targeted=config.SKILL_USE_TARGETED,
-            skill_use_mock=config.SKILL_USE_MOCK
+            skill_use_mock=config.SKILL_USE_MOCK,
+            config=config
         )
 
         # 记录使用的搜索提供者类型，用于区分数据保存方式

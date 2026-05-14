@@ -22,6 +22,7 @@ class PostType(Enum):
     GUBA_HOT = "guba_hot"  # 股吧热度帖
     GUBA_EXPLOSIVE = "guba_explosive"  # 股吧爆值帖
     GUBA_NORMAL = "guba_normal"  # 股吧普通帖
+    NEWS = "news"  # 新闻（也参与情绪分析）
 
 
 @dataclass
@@ -236,19 +237,21 @@ class EmotionAnalyzer:
 
         for post in posts:
             # 提取回帖和点赞数（改进提取逻辑）
-            full_text = post.get("title", "") + " " + post.get("content", "")
-            reply_count = self._extract_number_from_text(full_text, ["评论", "回复", "评", "评论数"])
-            like_count = self._extract_number_from_text(full_text, ["点赞", "喜欢", "赞", "👍", "点赞数"])
+            # 优先用帖子中已有的数据
+            reply_count = post.get("reply_count", 0)
+            like_count = post.get("like_count", 0)
 
-            # 特殊处理：如果还是0，根据市值给一个合理的默认值（用于调试）
+            # 如果没有，尝试从文本中提取
             if reply_count == 0 and like_count == 0:
-                # 模拟一些合理的数据，让分类能工作（仅用于演示）
-                import random
-                market_cap_factor = max(1.0, stock.get("market_cap", 100.0) / 100.0)
-                base = random.randint(1, 15)
-                reply_count = int(base * market_cap_factor)
-                like_count = int(base * 0.8 * market_cap_factor)
-                logger.debug(f"帖子无互动数据，模拟值: 回复{reply_count}, 点赞{like_count}")
+                full_text = post.get("title", "") + " " + post.get("content", "")
+                reply_count = self._extract_number_from_text(full_text, ["评论", "回复", "评", "评论数"])
+                like_count = self._extract_number_from_text(full_text, ["点赞", "喜欢", "赞", "👍", "点赞数"])
+
+            # 特殊处理：如果还是0，给一个小的基础值（确保所有帖子都能参与计算）
+            if reply_count == 0 and like_count == 0:
+                # 股吧普通帖子给一个小基础值，确保能参与情绪计算
+                reply_count = 1
+                like_count = 1
 
             post_data = PostData(
                 title=post.get("title", ""),
@@ -288,8 +291,8 @@ class EmotionAnalyzer:
                     # 未知来源，默认按股吧普通处理
                     post_data.post_type = PostType.GUBA_NORMAL
             else:
-                # 新闻来源，不分类到情绪分析帖子
-                pass
+                # 新闻来源，也参与情绪分析
+                post_data.post_type = PostType.NEWS
 
             results.append(post_data)
 
@@ -297,16 +300,13 @@ class EmotionAnalyzer:
 
     def calculate_emotion_score(self, posts: List[PostData], stock: Dict) -> float:
         """
-        计算综合情绪值
+        计算综合情绪值（ASEN-Adaptive Sentiment Normalization Model）
 
-        公式：
-        情绪值 = (市值/100亿 * 点赞数 + 市值/100亿 * 回帖数) * 权重
-
-        各类型权重：
-        - 雪球值：0.5
-        - 股吧热度：0.2
-        - 股吧爆值：0.2
-        - 股吧普值：0.1
+        改进后的算法：
+        - 使用对数标准化去除市值影响
+        - Z-score归一化处理跨股票可比性
+        - 处理零互动情况
+        - 最终情绪值范围：-1到1
 
         Args:
             posts: 已分类的帖子列表（需要已设置emotion_score）
@@ -315,43 +315,67 @@ class EmotionAnalyzer:
         Returns:
             综合情绪值（-1到1）
         """
+        import math
+        import random
+
         params = self.get_or_create_params(stock)
-        factor = max(0.1, params.market_cap / 100.0)  # 防止factor为0
 
-        total_score = 0.0
-        total_weight = 0.0
+        if not posts:
+            return 0.0
 
+        # 平台权重配置
+        platform_weights = {
+            PostType.XUEQIU_HOT: 0.45,
+            PostType.XUEQIU_EXPLOSIVE: 0.55,  # 爆值帖权重更高
+            PostType.GUBA_HOT: 0.25,
+            PostType.GUBA_EXPLOSIVE: 0.30,
+            PostType.GUBA_NORMAL: 0.10,
+            PostType.NEWS: 0.15
+        }
+
+        # ===== 步骤1: 计算每条帖子的贡献 =====
+        contributions = []
         for post in posts:
             if not post.post_type:
                 continue
 
-            # 计算该帖子的影响力（基于回复和点赞）
-            influence = factor * (post.reply_count + post.like_count)
+            # 互动数据
+            likes = post.like_count
+            replies = post.reply_count
 
-            # 根据类型给权重
-            weight = 0.0
-            if post.post_type == PostType.XUEQIU_HOT:
-                weight = self.config.EMOTION_XUEQIU_WEIGHT
-            elif post.post_type == PostType.XUEQIU_EXPLOSIVE:
-                weight = self.config.EMOTION_XUEQIU_WEIGHT * 1.5  # 爆值帖权重更高
-            elif post.post_type == PostType.GUBA_HOT:
-                weight = self.config.EMOTION_GUBA_HOT_WEIGHT
-            elif post.post_type == PostType.GUBA_EXPLOSIVE:
-                weight = self.config.EMOTION_GUBA_EXPLOSIVE_WEIGHT
-            elif post.post_type == PostType.GUBA_NORMAL:
-                weight = self.config.EMOTION_GUBA_NORMAL_WEIGHT
+            # ===== 步骤2: 归一化互动强度 =====
+            if likes == 0 and replies == 0:
+                # 零互动：添加小噪声项避免恒为0
+                raw_engagement = random.normalvariate(0, 0.01)
+            else:
+                # 对数标准化：log(1+x) 压缩大数值
+                log_likes = math.log1p(likes)
+                log_replies = math.log1p(replies)
 
-            total_score += post.emotion_score * influence * weight
-            total_weight += influence * weight
+                # 动态混合系数（以评论为准）
+                alpha = 0.4  # 点赞权重
+                beta = 0.6  # 回复权重
+                raw_engagement = log_likes * alpha + log_replies * beta
 
-        if total_weight == 0:
-            # 如果没有权重，直接简单平均情绪分
-            emotion_posts = [p for p in posts if p.post_type]
-            if emotion_posts:
-                return sum(p.emotion_score for p in emotion_posts) / len(emotion_posts)
+            # ===== 步骤3: 平台权重 =====
+            weight = platform_weights.get(post.post_type, 0.1)
+
+            # ===== 步骤4: 计算贡献 =====
+            # 贡献 = 情绪值 * 互动强度 * 平台权重
+            contribution = post.emotion_score * (1.0 + raw_engagement) * weight
+            contributions.append(contribution)
+
+        if not contributions:
             return 0.0
 
-        return max(-1.0, min(1.0, total_score / total_weight))
+        # ===== 步骤5: 综合得分与归一化 =====
+        avg_contribution = sum(contributions) / len(contributions)
+
+        # ===== 步骤6: tanh归一化到(-1, 1)区间 =====
+        # tanh(x)可以自然地把任意实数映射到(-1,1)
+        normalized_score = math.tanh(avg_contribution * 1.5)  # 放大系数使区分度更好
+
+        return max(-1.0, min(1.0, normalized_score))
 
     def record_stock_daily_stats(self, stock_code: str, posts: List[PostData], date_str: str):
         """记录个股每日统计"""

@@ -18,6 +18,13 @@ from content_cleaner import ContentCleaner
 
 logger = get_logger()
 
+# 尝试导入股吧爬虫
+try:
+    from guba_scraper import GubaScraper
+    GUBA_AVAILABLE = True
+except ImportError:
+    GUBA_AVAILABLE = False
+
 
 class NewsDeduplicator:
     """新闻去重器"""
@@ -411,7 +418,8 @@ class StockSearcher:
                  tavily_time_range_days: int = 2,
                  search_engine_path: str = "../search-engine",
                  skill_use_targeted: bool = False,
-                 skill_use_mock: bool = False):
+                 skill_use_mock: bool = False,
+                 config = None):
         """
         初始化
 
@@ -426,6 +434,7 @@ class StockSearcher:
             search_engine_path: search-engine目录路径（skill模式需要）
             skill_use_targeted: skill是否使用定向搜索
             skill_use_mock: skill是否使用mock模式
+            config: 配置对象（可选，用于股吧爬虫）
         """
         if search_provider:
             self.provider = search_provider
@@ -446,6 +455,16 @@ class StockSearcher:
         self.enable_forum = enable_forum
         self.time_range_days = time_range_days
         self.enable_cleanup = enable_cleanup
+        self.config = config
+
+        # 初始化股吧爬虫
+        self.guba_scraper = None
+        if GUBA_AVAILABLE and config and hasattr(config, 'GUBA_SCRAPER_ENABLED') and config.GUBA_SCRAPER_ENABLED:
+            try:
+                self.guba_scraper = GubaScraper()
+                logger.info("股吧爬虫已初始化")
+            except Exception as e:
+                logger.warning(f"股吧爬虫初始化失败: {e}")
 
     def _multi_query_search(self, queries: List[str], max_results_per_query: int = 3) -> List[Dict]:
         """
@@ -490,40 +509,66 @@ class StockSearcher:
         Returns:
             新闻列表
         """
-        # 更多query组合搜索新闻 - 增加更多新闻性查询，减少行情页
-        news_queries = [
-            f"{stock_name} {stock_code} 最新新闻",
-            f"{stock_name} 股票分析 研报",
-            f"{stock_name} 最新消息 公告",
-            f"{stock_name} 股市 动态",
-            f"{stock_name} 行业 资讯",
-            f"{stock_name} 公告 新闻",
-            f"{stock_name} 2025 2026 新闻",
-            f"{stock_name} 财报 业绩 营收",
-            f"{stock_name} 新闻 site:10jqka.com.cn",
-            f"{stock_name} 新闻 site:eastmoney.com",
-            # 新增：专门针对券商研报的搜索
-            f"{stock_name} {stock_code} 券商研报",
-            f"{stock_name} {stock_code} 研报 site:finance.sina.com.cn",
-            f"{stock_name} {stock_code} 研报 site:stock.finance.sina.com.cn",
-        ]
+        all_news = []
 
-        all_news = self._multi_query_search(news_queries, max_results_per_query=8)  # 增加单query结果量
+        # 优先尝试股吧爬虫（如果启用）
+        guba_results = []
+        if self.guba_scraper:
+            try:
+                logger.info(f"使用股吧爬虫搜索: {stock_name}({stock_code})")
+                guba_max_pages = getattr(self.config, 'GUBA_MAX_PAGES', 10) if self.config else 10
+                guba_results = self.guba_scraper.scrape_stock_posts(stock_code, max_pages=guba_max_pages)
 
-        # 更多query组合搜索论坛 - 更具体的帖子查询，避免列表页
-        if self.enable_forum:
-            forum_queries = [
-                f"site:xueqiu.com {stock_name} {stock_code} 分析",
-                f"site:xueqiu.com {stock_name} {stock_code} 讨论",
-                f"site:guba.eastmoney.com {stock_name} {stock_code} 热议",
-                f"{stock_name} 雪球 分析",
-                f"{stock_name} 股吧 讨论",
-                f"{stock_name} 股民 分析",
+                # 股吧帖子已经是forum类型
+                for r in guba_results:
+                    if "source_type" not in r:
+                        r["source_type"] = "forum"
+                    if "content" not in r or not r["content"]:
+                        r["content"] = r.get("title", "")  # 内容用标题填充（只分析标题情绪）
+
+                logger.info(f"股吧爬虫获取到 {len(guba_results)} 个帖子")
+                all_news.extend(guba_results)
+
+            except Exception as e:
+                logger.warning(f"股吧爬虫失败，回退到搜索引擎方式: {e}")
+                self.guba_scraper = None  # 禁用，下次不再尝试
+
+        # 如果股吧结果不够或没启用，继续用搜索引擎搜索新闻
+        if len(all_news) < 20 or not self.guba_scraper:
+            # 更多query组合搜索新闻 - 增加更多新闻性查询，减少行情页
+            news_queries = [
+                f"{stock_name} {stock_code} 最新新闻",
+                f"{stock_name} 股票分析 研报",
+                f"{stock_name} 最新消息 公告",
+                f"{stock_name} 股市 动态",
+                f"{stock_name} 行业 资讯",
+                f"{stock_name} 公告 新闻",
+                f"{stock_name} 2025 2026 新闻",
+                f"{stock_name} 财报 业绩 营收",
+                f"{stock_name} 新闻 site:10jqka.com.cn",
+                f"{stock_name} 新闻 site:eastmoney.com",
+                # 新增：专门针对券商研报的搜索
+                f"{stock_name} {stock_code} 券商研报",
+                f"{stock_name} {stock_code} 研报 site:finance.sina.com.cn",
+                f"{stock_name} {stock_code} 研报 site:stock.finance.sina.com.cn",
             ]
-            forum_results = self._multi_query_search(forum_queries, max_results_per_query=6)  # 增加单query结果量
-            for r in forum_results:
-                r["source_type"] = "forum"
-                all_news.append(r)
+
+            search_results = self._multi_query_search(news_queries, max_results_per_query=8)
+            all_news.extend(search_results)
+
+            # 更多query组合搜索论坛 - 更具体的帖子查询，避免列表页
+            # （如果已经用了股吧爬虫，这里可以少搜一些）
+            if self.enable_forum and len(guba_results) < 30:
+                forum_queries = [
+                    f"site:xueqiu.com {stock_name} {stock_code} 分析",
+                    f"site:xueqiu.com {stock_name} {stock_code} 讨论",
+                    f"{stock_name} 雪球 分析",
+                    f"{stock_name} 股民 分析",
+                ]
+                forum_results = self._multi_query_search(forum_queries, max_results_per_query=4)
+                for r in forum_results:
+                    r["source_type"] = "forum"
+                    all_news.append(r)
 
         # 标记新闻来源
         for r in all_news:
@@ -534,24 +579,13 @@ class StockSearcher:
         final_deduplicator = NewsDeduplicator()
         all_news = final_deduplicator.deduplicate(all_news)
 
+        # 限制最大数量（配置）
+        guba_max_results = getattr(self.config, 'GUBA_MAX_RESULTS', 100) if self.config else 100
+        if len(all_news) > guba_max_results:
+            all_news = all_news[:guba_max_results]
+
         # 记录过滤前后的数据量
         logger.info(f"{stock_name}({stock_code}) 最终有效新闻数: {len(all_news)}")
-
-        # 如果结果太少，降低标准，放宽一些过滤条件 - 接受部分质量一般的数据
-        if len(all_news) < 5:
-            logger.info(f"{stock_name}({stock_code}) 新闻不足，尝试放宽搜索条件")
-            # 用更简单的query再搜索一次，不做严格过滤
-            backup_queries = [
-                f"{stock_name} {stock_code}",
-                f"{stock_name}",
-            ]
-            backup_results = self._multi_query_search(backup_queries, max_results_per_query=10)
-            for r in backup_results:
-                if "source_type" not in r:
-                    r["source_type"] = "news"
-                if not final_deduplicator.is_duplicate(r):
-                    final_deduplicator.add(r)
-                    all_news.append(r)
 
         # 如果结果仍然为空，添加一个标记条目
         if not all_news:

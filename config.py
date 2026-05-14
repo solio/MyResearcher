@@ -23,13 +23,15 @@ class Config:
         else:
             print(f"警告: 配置文件 {env_file} 不存在，使用默认配置")
 
+        # flash keys: sk-23e14718482342fd8b4b1ff7d0232c8d
         # ========== API 配置 ==========
         self.DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-0a3f7ffc68eb4f84b9a906085d9842e3")
         self.DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
-        self.DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+        self.DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
-        # 备用key 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
-        self.TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "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")
+        # 备用key1 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 
+        # 备用key2 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
+        self.TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "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")
 
         # ========== 定时任务配置 ==========
         self.CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "180"))
@@ -87,6 +89,12 @@ class Config:
         self.EMOTION_PARAM_MIN = int(os.getenv("EMOTION_PARAM_MIN", "1"))  # 参数最小值
 
         self.EMOTION_DATA_FILE = os.getenv("EMOTION_DATA_FILE", "./output/emotion_params.json")  # 情绪参数文件
+
+        # ========== 股吧搜索配置 ==========
+        self.GUBA_SCRAPER_ENABLED = os.getenv("GUBA_SCRAPER_ENABLED", "true").lower() == "true"  # 启用股吧爬虫
+        self.GUBA_MAX_PAGES = int(os.getenv("GUBA_MAX_PAGES", "10"))  # 股吧最大爬取页数
+        self.GUBA_MAX_RESULTS = int(os.getenv("GUBA_MAX_RESULTS", "80"))  # 股吧最大帖子数量
+        self.GUBA_ONLY_24H = os.getenv("GUBA_ONLY_24H", "true").lower() == "true"  # 仅24小时内帖子
 
         # ========== 输出配置 ==========
         self.OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./output")
