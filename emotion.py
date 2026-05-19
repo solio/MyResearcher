@@ -300,13 +300,11 @@ class EmotionAnalyzer:
 
     def calculate_emotion_score(self, posts: List[PostData], stock: Dict) -> float:
         """
-        计算综合情绪值（ASEN-Adaptive Sentiment Normalization Model）
+        计算综合情绪值
 
-        改进后的算法：
-        - 使用对数标准化去除市值影响
-        - Z-score归一化处理跨股票可比性
-        - 处理零互动情况
-        - 最终情绪值范围：-1到1
+        简化算法：
+        - 直接按平台权重加权平均情绪值
+        - 情绪值范围：-1到1
 
         Args:
             posts: 已分类的帖子列表（需要已设置emotion_score）
@@ -315,11 +313,6 @@ class EmotionAnalyzer:
         Returns:
             综合情绪值（-1到1）
         """
-        import math
-        import random
-
-        params = self.get_or_create_params(stock)
-
         if not posts:
             return 0.0
 
@@ -333,49 +326,31 @@ class EmotionAnalyzer:
             PostType.NEWS: 0.15
         }
 
-        # ===== 步骤1: 计算每条帖子的贡献 =====
-        contributions = []
+        # 计算加权平均
+        total_weight = 0.0
+        weighted_sum = 0.0
+
         for post in posts:
             if not post.post_type:
                 continue
 
-            # 互动数据
-            likes = post.like_count
-            replies = post.reply_count
-
-            # ===== 步骤2: 归一化互动强度 =====
-            if likes == 0 and replies == 0:
-                # 零互动：添加小噪声项避免恒为0
-                raw_engagement = random.normalvariate(0, 0.01)
-            else:
-                # 对数标准化：log(1+x) 压缩大数值
-                log_likes = math.log1p(likes)
-                log_replies = math.log1p(replies)
-
-                # 动态混合系数（以评论为准）
-                alpha = 0.4  # 点赞权重
-                beta = 0.6  # 回复权重
-                raw_engagement = log_likes * alpha + log_replies * beta
-
-            # ===== 步骤3: 平台权重 =====
+            # 获取权重
             weight = platform_weights.get(post.post_type, 0.1)
 
-            # ===== 步骤4: 计算贡献 =====
-            # 贡献 = 情绪值 * 互动强度 * 平台权重
-            contribution = post.emotion_score * (1.0 + raw_engagement) * weight
-            contributions.append(contribution)
+            # 如果帖子有情绪值，参与计算
+            if post.emotion_score != 0:
+                logger.debug(f"帖子情绪值: {post.emotion_score:.3f}, 权重: {weight}, 标题: {post.title[:30]}")
 
-        if not contributions:
+            weighted_sum += post.emotion_score * weight
+            total_weight += weight
+
+        if total_weight == 0:
             return 0.0
 
-        # ===== 步骤5: 综合得分与归一化 =====
-        avg_contribution = sum(contributions) / len(contributions)
+        avg_score = weighted_sum / total_weight
+        logger.info(f"情绪计算结果: 加权平均={avg_score:.3f}, 帖子数={len(posts)}, 总权重={total_weight:.1f}")
 
-        # ===== 步骤6: tanh归一化到(-1, 1)区间 =====
-        # tanh(x)可以自然地把任意实数映射到(-1,1)
-        normalized_score = math.tanh(avg_contribution * 1.5)  # 放大系数使区分度更好
-
-        return max(-1.0, min(1.0, normalized_score))
+        return max(-1.0, min(1.0, avg_score))
 
     def record_stock_daily_stats(self, stock_code: str, posts: List[PostData], date_str: str):
         """记录个股每日统计"""

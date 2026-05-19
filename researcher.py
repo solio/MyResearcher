@@ -12,6 +12,7 @@ from config import Config
 from searcher import TavilySearchProvider, StockSearcher, NewsDeduplicator
 from llm import DeepSeekLLMProvider, StockAnalyzer
 from emotion import EmotionAnalyzer, PostData, PostType
+from emotion_v2 import EmotionScoreV2
 from logger import get_logger
 from console import print_warning
 
@@ -43,9 +44,13 @@ class ResearchResult:
         self.classified_posts: List[PostData] = []
         self.param_suggestion: str = ""
 
+        # V2 精细情绪分析
+        self.use_v2_emotion: bool = False  # 是否使用V2版本
+        self.emotion_v2: Optional[EmotionScoreV2] = None  # V2评分结果
+
     def to_dict(self) -> Dict:
         """转换为字典"""
-        return {
+        result_dict = {
             "target_type": self.target_type,
             "target_name": self.target_name,
             "news_list": self.news_list,
@@ -55,8 +60,16 @@ class ResearchResult:
             "is_no_update": self.is_no_update,
             "failure_reason": self.failure_reason,
             "emotion_score": self.emotion_score,
-            "param_suggestion": self.param_suggestion
+            "param_suggestion": self.param_suggestion,
+            "use_v2_emotion": self.use_v2_emotion
         }
+
+        # 添加V2情绪分析数据
+        if self.use_v2_emotion and self.emotion_v2:
+            from dataclasses import asdict
+            result_dict["emotion_v2"] = asdict(self.emotion_v2)
+
+        return result_dict
 
 
 class HistoryManager:
@@ -168,14 +181,14 @@ class StockResearcher:
         self.search_provider_type = config.SEARCH_PROVIDER
 
         # 初始化 LLM 提供者
-        llm_provider = DeepSeekLLMProvider(
+        self.llm_provider = DeepSeekLLMProvider(
             api_key=config.DEEPSEEK_API_KEY,
             api_base=config.DEEPSEEK_API_BASE,
             model=config.DEEPSEEK_MODEL,
             timeout=config.LLM_TIMEOUT,
             max_retries=config.LLM_MAX_RETRIES
         )
-        self.analyzer = StockAnalyzer(llm_provider)
+        self.analyzer = StockAnalyzer(self.llm_provider)
 
         # 初始化情绪分析器
         self.emotion_analyzer = EmotionAnalyzer(config)
@@ -269,12 +282,47 @@ class StockResearcher:
                 if llm_suggestion:
                     result.param_suggestion += f"【LLM调整建议】\n{llm_suggestion}\n"
 
+                # 4.5 V2 精细情绪分析（7级评分）
+                result.use_v2_emotion = True
+                logger.info("=" * 60)
+                logger.info("开始 V2 7级精细情绪分析")
+                logger.info("=" * 60)
+
+                # 分离帖子和新闻
+                forum_posts = [p for p in result.news_list if p.get("source_type") == "forum"]
+
+                # 调用新的V2分析函数
+                import emotion_v2
+                result.emotion_v2 = emotion_v2.analyze_emotion_v2(
+                    posts=forum_posts,
+                    stock_name=stock["name"],
+                    stock_code=stock["code"],
+                    market_cap=stock.get("market_cap", 100.0),
+                    llm_provider=self.llm_provider
+                )
+
+                if result.emotion_v2:
+                    # 更新结果中的情绪值（使用V2评分，归一化到-1~1范围）
+                    result.emotion_score = result.emotion_v2.final_score / 3.0
+
+                    logger.info(f"V2 情绪分析完成: {result.emotion_v2.rating_emoji} {result.emotion_v2.rating_level} "
+                              f"({result.emotion_v2.final_score:.3f})")
+                    logger.info(f"置信度: {result.emotion_v2.confidence:.1%}")
+                    logger.info("=" * 60)
+                else:
+                    logger.warning("V2 情绪分析失败，继续使用V1版本")
+                    result.use_v2_emotion = False
+
                 # 5. LLM深度分析（带情绪值）
+                emotion_score_for_llm = result.emotion_score
+                if result.use_v2_emotion and result.emotion_v2:
+                    emotion_score_for_llm = result.emotion_v2.final_score / 3.0
+
                 result.analysis = self.analyzer.analyze_news_with_sentiment(
                     result.news_list,
                     target_name,
                     "stock",
-                    result.emotion_score,
+                    emotion_score_for_llm,
                     result.classified_posts
                 )
 
@@ -556,37 +604,62 @@ class StockResearcher:
 
             # 情绪指标
             if result.target_type == "stock":
-                emotion_label = "中性"
-                if result.emotion_score > 0.6:
-                    emotion_label = "😃 极度贪婪"
-                elif result.emotion_score > 0.2:
-                    emotion_label = "🙂 贪婪"
-                elif result.emotion_score < -0.6:
-                    emotion_label = "😱 极度恐惧"
-                elif result.emotion_score < -0.2:
-                    emotion_label = "😟 恐惧"
+                if result.use_v2_emotion and result.emotion_v2:
+                    # V2 精细情绪分析显示
+                    md += "### 情绪指标 V2 (7级精细评分)\n\n"
+                    md += f"- 最终评分: **{result.emotion_v2.final_score:.3f}**\n"
+                    md += f"- 情绪评级: {result.emotion_v2.rating_emoji} {result.emotion_v2.rating_level}\n"
+                    md += f"- 置信度: {result.emotion_v2.confidence:.1%}\n\n"
 
-                md += "### 情绪指标\n\n"
-                md += f"- 综合情绪值: **{result.emotion_score:.3f}**\n"
-                md += f"- 情绪标签: {emotion_label}\n\n"
+                    md += "#### 样本统计\n\n"
+                    md += f"- 帖子总数: {result.emotion_v2.total_posts}\n"
+                    md += f"- 新闻总数: {result.emotion_v2.total_news}\n"
+                    md += f"- 总互动数: {result.emotion_v2.total_interactions}\n"
+                    md += f"- 丰裕系数: {result.emotion_v2.abundance_coefficient:.2f}\n\n"
 
-                if result.classified_posts:
-                    # 统计分类
-                    xueqiu_hot = sum(1 for p in result.classified_posts if p.post_type == PostType.XUEQIU_HOT)
-                    xueqiu_explosive = sum(1 for p in result.classified_posts if p.post_type == PostType.XUEQIU_EXPLOSIVE)
-                    guba_hot = sum(1 for p in result.classified_posts if p.post_type == PostType.GUBA_HOT)
-                    guba_explosive = sum(1 for p in result.classified_posts if p.post_type == PostType.GUBA_EXPLOSIVE)
-                    guba_normal = sum(1 for p in result.classified_posts if p.post_type == PostType.GUBA_NORMAL)
+                    if result.emotion_v2.trend_analysis:
+                        md += "#### 趋势分析\n\n"
+                        md += f"{result.emotion_v2.trend_analysis}\n\n"
 
-                    md += f"- 雪球热帖: {xueqiu_hot}\n"
-                    md += f"- 雪球爆值帖: {xueqiu_explosive}\n"
-                    md += f"- 股吧热度帖: {guba_hot}\n"
-                    md += f"- 股吧爆值帖: {guba_explosive}\n"
-                    md += f"- 股吧普通帖: {guba_normal}\n\n"
+                    if result.emotion_v2.key_post_titles:
+                        md += "#### 关键影响帖子\n\n"
+                        for i, title in enumerate(result.emotion_v2.key_post_titles[:5], 1):
+                            md += f"{i}. {title}\n"
+                        md += "\n"
 
-                if result.param_suggestion:
-                    md += f"### 参数调整建议\n\n"
-                    md += result.param_suggestion + "\n\n"
+                else:
+                    # V1 原始情绪分析显示（兼容）
+                    emotion_label = "中性"
+                    if result.emotion_score > 0.6:
+                        emotion_label = "😃 极度贪婪"
+                    elif result.emotion_score > 0.2:
+                        emotion_label = "🙂 贪婪"
+                    elif result.emotion_score < -0.6:
+                        emotion_label = "😱 极度恐惧"
+                    elif result.emotion_score < -0.2:
+                        emotion_label = "😟 恐惧"
+
+                    md += "### 情绪指标\n\n"
+                    md += f"- 综合情绪值: **{result.emotion_score:.3f}**\n"
+                    md += f"- 情绪标签: {emotion_label}\n\n"
+
+                    if result.classified_posts:
+                        # 统计分类
+                        xueqiu_hot = sum(1 for p in result.classified_posts if p.post_type == PostType.XUEQIU_HOT)
+                        xueqiu_explosive = sum(1 for p in result.classified_posts if p.post_type == PostType.XUEQIU_EXPLOSIVE)
+                        guba_hot = sum(1 for p in result.classified_posts if p.post_type == PostType.GUBA_HOT)
+                        guba_explosive = sum(1 for p in result.classified_posts if p.post_type == PostType.GUBA_EXPLOSIVE)
+                        guba_normal = sum(1 for p in result.classified_posts if p.post_type == PostType.GUBA_NORMAL)
+
+                        md += f"- 雪球热帖: {xueqiu_hot}\n"
+                        md += f"- 雪球爆值帖: {xueqiu_explosive}\n"
+                        md += f"- 股吧热度帖: {guba_hot}\n"
+                        md += f"- 股吧爆值帖: {guba_explosive}\n"
+                        md += f"- 股吧普通帖: {guba_normal}\n\n"
+
+                    if result.param_suggestion:
+                        md += f"### 参数调整建议\n\n"
+                        md += result.param_suggestion + "\n\n"
 
             # 新闻列表
             md += "### 新闻列表\n\n"

@@ -64,9 +64,9 @@ class Config:
         self.LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))  # LLM最大重试次数
 
         # ========== 搜索过滤配置 ==========
-        # 搜索时间范围：None表示用各provider默认值（Tavily用2天，skill用60天）
+        # 搜索时间范围：默认7天内的新闻，避免重复
         time_range_env = os.getenv("SEARCH_TIME_RANGE_DAYS")
-        self.SEARCH_TIME_RANGE_DAYS = int(time_range_env) if time_range_env and time_range_env.strip() else None
+        self.SEARCH_TIME_RANGE_DAYS = int(time_range_env) if time_range_env and time_range_env.strip() else 7
         self.SEARCH_MIN_CONTENT_LENGTH = int(os.getenv("SEARCH_MIN_CONTENT_LENGTH", "50"))  # 内容最小长度
         self.SEARCH_MAX_PAGES = int(os.getenv("SEARCH_MAX_PAGES", "3"))  # 最大翻页次数
         self.ENABLE_CONTENT_CLEANUP = os.getenv("ENABLE_CONTENT_CLEANUP", "true").lower() == "true"  # 是否清理模板内容

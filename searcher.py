@@ -137,14 +137,34 @@ class TavilySearchProvider(BaseSearchProvider):
                      search_depth: str = "basic",
                      include_answer: bool = False,
                      time_range_days: Optional[int] = None) -> Dict:
-        """执行一次搜索（注意：Tavily对中文搜索不支持after:日期语法，直接搜索）"""
+        """执行一次搜索"""
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}"
         }
 
-        # 不使用日期后缀，Tavily对中文搜索的日期语法支持不好
-        # 信任Tavily会返回较新的结果
+        # 使用Tavily的time_range参数
+        # time_range可选值: "day", "week", "month", "year"
+        time_range = None
+        if time_range_days is not None:
+            if time_range_days <= 1:
+                time_range = "day"
+            elif time_range_days <= 7:
+                time_range = "week"
+            elif time_range_days <= 30:
+                time_range = "month"
+            else:
+                time_range = "year"
+        elif self.tavily_time_range_days is not None:
+            if self.tavily_time_range_days <= 1:
+                time_range = "day"
+            elif self.tavily_time_range_days <= 7:
+                time_range = "week"
+            elif self.tavily_time_range_days <= 30:
+                time_range = "month"
+            else:
+                time_range = "year"
+
         payload = {
             "query": query,
             "search_depth": search_depth,
@@ -153,6 +173,10 @@ class TavilySearchProvider(BaseSearchProvider):
             "include_images": False,
             "include_raw_content": False,
         }
+
+        if time_range:
+            payload["time_range"] = time_range
+            logger.debug(f"使用time_range: {time_range}")
 
         response = requests.post(self.base_url, json=payload, headers=headers, timeout=self.timeout)
         response.raise_for_status()
@@ -168,7 +192,7 @@ class TavilySearchProvider(BaseSearchProvider):
         Args:
             query: 搜索关键词
             max_results: 返回结果数量
-            time_range_days: （不再使用，保留兼容）
+            time_range_days: 时间范围（天数）
             enable_cleanup: 是否清理内容
             max_pages: 最大翻页次数
 
@@ -196,7 +220,9 @@ class TavilySearchProvider(BaseSearchProvider):
             for attempt in range(1, self.max_retries + 1):
                 try:
                     result = self._search_once(
-                        current_query, max_results * 4  # 请求更多结果（过滤会过滤掉很多行情页）
+                        current_query,
+                        max_results * 4,  # 请求更多结果（过滤会过滤掉很多行情页）
+                        time_range_days=time_range_days
                     )
                     new_results = self._format_results(result)
 

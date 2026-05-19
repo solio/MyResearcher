@@ -167,7 +167,7 @@ class StockAnalyzer:
 
     def analyze_batch_post_emotions(self, posts: List) -> Dict[int, float]:
         """
-        批量分析多个帖子的情绪（节省token）
+        批量分析多个帖子的情绪（节省token，仅分析标题）
 
         Args:
             posts: PostData列表
@@ -178,18 +178,18 @@ class StockAnalyzer:
         if not posts:
             return {}
 
-        # 构建批量分析提示词
+        # 构建批量分析提示词 - 仅使用标题
         posts_text = ""
         for i, post in enumerate(posts):
-            posts_text += f"【帖子{i}】\n"
-            posts_text += f"标题：{post.title}\n"
-            posts_text += f"内容：{post.content[:200]}\n\n"
+            posts_text += f"【帖子{i}】标题：{post.title}\n"
 
         prompt = f"""
-请分析以下{len(posts)}个帖子的情绪，每个帖子返回一个-1到1之间的数字：
+请分析以下{len(posts)}个帖子标题的情绪，每个帖子返回一个-1到1之间的数字：
 -1表示极度悲观/利空
 0表示中性
 1表示极度乐观/利多
+
+仅根据标题判断，不需要考虑内容。
 
 {posts_text}
 
@@ -201,11 +201,15 @@ class StockAnalyzer:
 2: 0.0
 """
 
+        logger.info(f"调用LLM批量分析 {len(posts)} 个帖子的情绪...")
         messages = [{"role": "user", "content": prompt}]
         result = self.llm.chat(messages, temperature=0.3, max_tokens=500)
 
         if result is None:
+            logger.warning("LLM返回None，所有帖子情绪值设为0")
             return {i: 0.0 for i in range(len(posts))}
+
+        logger.info(f"LLM返回结果:\n{result}")
 
         # 解析结果
         emotion_map = {}
@@ -213,11 +217,16 @@ class StockAnalyzer:
             import re
             lines = result.strip().split("\n")
             for line in lines:
-                match = re.search(r'(\d+)\s*:\s*([-+]?\d*\.?\d+)', line)
+                line = line.strip()
+                if not line:
+                    continue
+
+                match = re.search(r'(\d+)\s*[:：]\s*([-+]?\d*\.?\d+)', line)
                 if match:
                     idx = int(match.group(1))
                     score = float(match.group(2))
                     emotion_map[idx] = max(-1.0, min(1.0, score))
+                    logger.debug(f"解析到帖子 {idx}: 情绪值 = {score:.3f}")
         except Exception as e:
             logger.warning(f"批量情绪分析结果解析失败: {e}")
 
@@ -226,6 +235,7 @@ class StockAnalyzer:
             if i not in emotion_map:
                 emotion_map[i] = 0.0
 
+        logger.info(f"情绪分析完成: {len(emotion_map)} 个帖子, 非零值: {sum(1 for v in emotion_map.values() if v != 0)}")
         return emotion_map
 
     def suggest_emotion_params(self, stock_name: str, market_cap: float,
@@ -446,6 +456,42 @@ class StockAnalyzer:
             return "摘要生成失败"
 
         return result
+
+    def analyze_emotion_v2(self,
+                          posts: List[Dict],
+                          news_list: List[Dict],
+                          stock_name: str,
+                          stock_code: str,
+                          market_cap: float,
+                          llm_provider,
+                          industry_score: Optional[float] = None):
+        """
+        使用LLM进行7级精细情绪分析（V2版本）
+
+        Args:
+            posts: 帖子列表
+            news_list: 新闻列表（暂未使用）
+            stock_name: 股票名称
+            stock_code: 股票代码
+            market_cap: 市值（亿）
+            llm_provider: LLM提供者实例
+            industry_score: 行业平均情绪分（可选）
+
+        Returns:
+            EmotionScoreV2对象，失败返回None
+        """
+        import emotion_v2
+
+        if not posts:
+            return None
+
+        return emotion_v2.analyze_emotion_v2(
+            posts=posts,
+            stock_name=stock_name,
+            stock_code=stock_code,
+            market_cap=market_cap,
+            llm_provider=llm_provider
+        )
 
 
 # ========== 兼容旧代码的类名 ==========
