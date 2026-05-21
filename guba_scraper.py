@@ -155,7 +155,21 @@ class GubaScraper:
         soup = BeautifulSoup(html, 'lxml')
 
         # 股吧是5列表格：阅读|评论|标题|作者|最后更新
-        trs = soup.find_all("tr")
+        # 找到帖子列表区域，通常在一个class含"listbody"或"datatable"的table里
+        target_table = None
+        for table in soup.find_all("table"):
+            # 检查table中是否有该股票的帖子链接
+            if table.find("a", href=re.compile(rf'/news,{stock_code},\d+\.html')):
+                target_table = table
+                break
+
+        # 如果没找到特定table，降级到找所有tr
+        trs = []
+        if target_table:
+            trs = target_table.find_all("tr")
+        else:
+            trs = soup.find_all("tr")
+
         for tr in trs:
             tds = tr.find_all("td")
             if len(tds) < 5:
@@ -168,7 +182,7 @@ class GubaScraper:
             td_author = tds[3].get_text(strip=True)
             td_time = tds[4].get_text(strip=True)
 
-            # 在标题列中找链接
+            # 在标题列中找链接 - 必须精确匹配当前股票代码！
             a_tag = td_title.find("a", href=re.compile(rf'/news,{stock_code},\d+\.html'))
             if not a_tag:
                 continue
@@ -185,8 +199,19 @@ class GubaScraper:
             # 获取标题
             title = a_tag.get_text(strip=True)
 
-            # 清理标题
+            # 清理标题 - 更严格的验证
             if not title or len(title) < 2:
+                continue
+
+            # 【重要】验证标题是否与股票相关，过滤明显不相关的垃圾信息
+            # 常见的股吧广告/垃圾标题特征
+            skip_patterns = [
+                "张楠", "飞书", "天猫好房", "基金经理", "钟南山", "新冠疫苗",
+                "恒大", "抖音", "快手", "淘宝", "京东", "拼多多",
+                "加微信", "QQ群", "vx", "v信", "老师", "带你",
+                "合作", "分成", "盈利", "解套", "指导", "诊股"
+            ]
+            if any(p in title for p in skip_patterns):
                 continue
 
             # 解析阅读数和评论数

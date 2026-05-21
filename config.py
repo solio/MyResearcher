@@ -31,7 +31,8 @@ class Config:
 
         # 备用key1 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 
         # 备用key2 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
-        self.TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "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")
+        # 备用key3 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
+        self.TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "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")
 
         # ========== 定时任务配置 ==========
         self.CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "180"))
