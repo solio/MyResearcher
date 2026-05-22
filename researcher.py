@@ -716,10 +716,10 @@ class StockResearcher:
                         md += "#### 交易指标\n\n"
                         tm = result.emotion_v3.trading_metrics
                         if tm.current_price is not None:
-                            md += f"- 当前价格: {tm.current_price}\n"
+                            md += f"- 当前价格: {tm.current_price:.2f}\n"
                         if tm.price_change_pct is not None:
-                            md += f"- 涨跌幅: {tm.price_change_pct:.2%}\n"
-                        if tm.volume_ratio is not None:
+                            md += f"- 涨跌幅: {tm.price_change_pct:.2f}%\n"
+                        if tm.volume_ratio is not None and tm.volume_ratio > 0:
                             md += f"- 量比: {tm.volume_ratio:.2f}\n"
                         if tm.turnover_rate is not None:
                             md += f"- 换手率: {tm.turnover_rate:.2f}%\n"

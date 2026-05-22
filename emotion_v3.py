@@ -24,9 +24,14 @@ from quant_scraper import (
 logger = get_logger()
 
 
-def analyze_news_sentiment(posts: List[Dict]) -> Tuple[NewsMetrics, float]:
+def analyze_news_sentiment_with_llm(
+    posts: List[Dict],
+    stock_name: str,
+    market_cap: float,
+    llm_provider
+) -> Tuple[NewsMetrics, float]:
     """
-    分析新闻情绪
+    用LLM分析新闻情绪
     返回：NewsMetrics对象, 新闻情绪分数 (-3.0 ~ +3.0)
     """
     if not posts:
@@ -38,57 +43,40 @@ def analyze_news_sentiment(posts: List[Dict]) -> Tuple[NewsMetrics, float]:
     if not news_posts:
         return NewsMetrics(0, 0, 0, 0, 0.0), 0.0
 
-    positive_count = 0
-    negative_count = 0
-    neutral_count = 0
+    # 构建提示词，用LLM分析
+    try:
+        from emotion_v2 import build_emotion_prompt, parse_llm_response
+        prompt = build_emotion_prompt(news_posts[:25], stock_name, market_cap)
 
-    # 关键词匹配法（简单但有效）
-    positive_keywords = ['涨', '涨停', '利好', '业绩增长', '突破', '创新高', '增持', '回购',
-                         '利好', '超预期', '盈利', '增长', '订单', '签约', '合作', '中标']
-    negative_keywords = ['跌', '跌停', '利空', '亏损', '下降', '下跌', '减持', '爆雷',
-                         '风险', '警示', '立案', '调查', '处罚', '跌停', '暴跌', '崩盘']
+        # 修改系统提示词，明确是分析新闻
+        llm_result = llm_provider.chat([{"role": "user", "content": prompt}],
+                                      temperature=0.4, max_tokens=1500)
 
-    for post in news_posts:
-        title = post.get('title', '')
-        content = post.get('content', '')
-        text = f"{title} {content}".lower()
+        if llm_result:
+            parsed = parse_llm_response(llm_result)
+            if parsed:
+                score = parsed.get('overall_sentiment_score', 0.0)
+                logger.info(f"新闻LLM情绪分数: {score:.3f}")
 
-        pos_count = sum(1 for k in positive_keywords if k in text)
-        neg_count = sum(1 for k in negative_keywords if k in text)
+                # 同时也统计一下关键词做参考
+                positive_count, negative_count, neutral_count = _count_keywords(news_posts, 'news')
+                return NewsMetrics(len(news_posts), positive_count, negative_count, neutral_count, score), score
 
-        if pos_count > neg_count:
-            positive_count += 1
-        elif neg_count > pos_count:
-            negative_count += 1
-        else:
-            neutral_count += 1
+    except Exception as e:
+        logger.debug(f"新闻LLM情绪分析异常: {e}")
 
-    total = len(news_posts)
-
-    # 计算情绪分数
-    if total == 0:
-        sentiment_score = 0.0
-    else:
-        # -3.0 ~ +3.0
-        sentiment_score = ((positive_count - negative_count) / total) * 3.0
-        sentiment_score = max(-3.0, min(3.0, sentiment_score))
-
-    metrics = NewsMetrics(
-        total_news=total,
-        positive_news=positive_count,
-        negative_news=negative_count,
-        neutral_news=neutral_count,
-        sentiment_score=sentiment_score
-    )
-
-    logger.info(f"新闻情绪分析: {positive_count}正/{negative_count}负/{neutral_count}中, 分数: {sentiment_score:.3f}")
-
-    return metrics, sentiment_score
+    # 如果LLM失败，返回关键词分析
+    return analyze_news_sentiment(posts)
 
 
-def analyze_forum_sentiment(posts: List[Dict]) -> Tuple[ForumMetrics, float]:
+def analyze_forum_sentiment_with_llm(
+    posts: List[Dict],
+    stock_name: str,
+    market_cap: float,
+    llm_provider
+) -> Tuple[ForumMetrics, float]:
     """
-    分析论坛情绪
+    用LLM分析论坛情绪
     返回：ForumMetrics对象, 论坛情绪分数 (-3.0 ~ +3.0)
     """
     if not posts:
@@ -115,34 +103,137 @@ def analyze_forum_sentiment(posts: List[Dict]) -> Tuple[ForumMetrics, float]:
         elif read_count > 5000 or reply_count > 20:
             hot_count += 1
 
-    # 情绪分析（关键词法）
-    bullish_count = 0
-    bearish_count = 0
+    # 主要用LLM分析
+    try:
+        from emotion_v2 import build_emotion_prompt, parse_llm_response
+        prompt = build_emotion_prompt(forum_posts[:25], stock_name, market_cap)
+        llm_result = llm_provider.chat([{"role": "user", "content": prompt}],
+                                      temperature=0.4, max_tokens=1500)
+
+        if llm_result:
+            parsed = parse_llm_response(llm_result)
+            if parsed:
+                score = parsed.get('overall_sentiment_score', 0.0)
+                logger.info(f"论坛LLM情绪分数: {score:.3f}")
+
+                # 同时也统计一下关键词做参考
+                bullish_count, bearish_count, neutral_count = _count_keywords(forum_posts, 'forum')
+                return ForumMetrics(
+                    len(forum_posts), hot_count, explosive_count,
+                    bullish_count, bearish_count, neutral_count,
+                    total_interactions, score
+                ), score
+
+    except Exception as e:
+        logger.debug(f"论坛LLM情绪分析异常: {e}")
+
+    # 如果LLM失败，返回关键词分析
+    return analyze_forum_sentiment(posts)
+
+
+def _count_keywords(posts: List[Dict], post_type: str) -> Tuple[int, int, int]:
+    """用关键词统计情绪（辅助方法）"""
+    positive_count = 0
+    negative_count = 0
     neutral_count = 0
 
-    bullish_keywords = ['涨', '买入', '看多', '抄底', '底部', '反弹', '牛市', '利好',
-                        '涨停', '持有', '加仓', '看好', '起飞', '突破', '新高']
-    bearish_keywords = ['跌', '卖出', '看空', '割肉', '顶部', '崩盘', '熊市', '利空',
-                        '跌停', '清仓', '减仓', '看衰', '暴跌', '破位', '新低']
+    if post_type == 'news':
+        positive_keywords = ['涨', '利好', '增长', '盈利', '突破', '新高', '增持', '回购', '中标', '签约']
+        negative_keywords = ['跌', '利空', '亏损', '下降', '风险', '警示', '立案', '调查', '处罚', '减持']
+    else:
+        positive_keywords = ['涨', '买入', '看多', '抄底', '底部', '反弹', '牛市', '利好',
+                           '涨停', '持有', '加仓', '看好', '起飞', '突破', '新高']
+        negative_keywords = ['跌', '卖出', '看空', '割肉', '顶部', '崩盘', '熊市', '利空',
+                           '跌停', '清仓', '减仓', '看衰', '暴跌', '破位', '新低']
 
-    for post in forum_posts:
+    for post in posts:
         title = post.get('title', '')
         content = post.get('content', '')
-        text = f"{title} {content}".lower()
+        text = f"{title} {content}"
 
-        bull_count = sum(1 for k in bullish_keywords if k in text)
-        bear_count = sum(1 for k in bearish_keywords if k in text)
+        pos_count = sum(1 for k in positive_keywords if k in text)
+        neg_count = sum(1 for k in negative_keywords if k in text)
 
-        if bull_count > bear_count:
-            bullish_count += 1
-        elif bear_count > bull_count:
-            bearish_count += 1
+        if pos_count > neg_count:
+            positive_count += 1
+        elif neg_count > pos_count:
+            negative_count += 1
         else:
             neutral_count += 1
 
-    total = len(forum_posts)
+    return positive_count, negative_count, neutral_count
+
+
+def analyze_news_sentiment(posts: List[Dict]) -> Tuple[NewsMetrics, float]:
+    """
+    关键词分析新闻情绪（备用方案）
+    返回：NewsMetrics对象, 新闻情绪分数 (-3.0 ~ +3.0)
+    """
+    if not posts:
+        return NewsMetrics(0, 0, 0, 0, 0.0), 0.0
+
+    # 筛选新闻类型帖子
+    news_posts = [p for p in posts if p.get('source_type') == 'news']
+
+    if not news_posts:
+        return NewsMetrics(0, 0, 0, 0, 0.0), 0.0
+
+    positive_count, negative_count, neutral_count = _count_keywords(news_posts, 'news')
 
     # 计算情绪分数
+    total = len(news_posts)
+    if total == 0:
+        sentiment_score = 0.0
+    else:
+        sentiment_score = ((positive_count - negative_count) / total) * 3.0
+        sentiment_score = max(-3.0, min(3.0, sentiment_score))
+
+    metrics = NewsMetrics(
+        total_news=total,
+        positive_news=positive_count,
+        negative_news=negative_count,
+        neutral_news=neutral_count,
+        sentiment_score=sentiment_score
+    )
+
+    logger.info(f"新闻情绪分析: {positive_count}正/{negative_count}负/{neutral_count}中, 分数: {sentiment_score:.3f}")
+
+    return metrics, sentiment_score
+
+
+def analyze_forum_sentiment(posts: List[Dict]) -> Tuple[ForumMetrics, float]:
+    """
+    关键词分析论坛情绪（备用方案）
+    返回：ForumMetrics对象, 论坛情绪分数 (-3.0 ~ +3.0)
+    """
+    if not posts:
+        return ForumMetrics(0, 0, 0, 0, 0, 0, 0, 0.0), 0.0
+
+    # 筛选论坛类型帖子
+    forum_posts = [p for p in posts if p.get('source_type') == 'forum']
+
+    if not forum_posts:
+        return ForumMetrics(0, 0, 0, 0, 0, 0, 0, 0.0), 0.0
+
+    # 分类帖子热度
+    hot_count = 0
+    explosive_count = 0
+    total_interactions = 0
+
+    for post in forum_posts:
+        read_count = post.get('read_count', 0)
+        reply_count = post.get('reply_count', 0)
+        total_interactions += read_count + reply_count
+
+        if read_count > 10000 or reply_count > 50:
+            explosive_count += 1
+        elif read_count > 5000 or reply_count > 20:
+            hot_count += 1
+
+    bullish_count, bearish_count, neutral_count = _count_keywords(forum_posts, 'forum')
+
+    # 计算情绪分数
+    total = len(forum_posts)
     if total == 0:
         sentiment_score = 0.0
     else:
@@ -175,6 +266,7 @@ def analyze_trading_sentiment(stock_code: str) -> Tuple[Optional[TradingMetrics]
         metrics = scraper.scrape(stock_code)
 
         if metrics and metrics.trading_score is not None:
+            logger.info(f"交易情绪分数: {metrics.trading_score:.3f}")
             return metrics, metrics.trading_score
 
         return None, 0.0
@@ -196,6 +288,7 @@ def analyze_emotion_v3(
 ) -> Optional[EmotionScoreV3]:
     """
     V3 多维度情绪分析主函数
+    主要依赖LLM分析，关键词只是备用方案
 
     Args:
         posts: 帖子列表
@@ -217,38 +310,20 @@ def analyze_emotion_v3(
 
     logger.info(f"开始V3多维度情绪分析: {stock_name}({stock_code})")
 
-    # 1. 分析新闻情绪
-    news_metrics, news_score = analyze_news_sentiment(posts)
+    # 1. 分析新闻情绪（先尝试LLM，失败用关键词）
+    news_metrics, news_score = analyze_news_sentiment_with_llm(
+        posts, stock_name, market_cap, llm_provider
+    )
 
-    # 2. 分析论坛情绪
-    forum_metrics, forum_score = analyze_forum_sentiment(posts)
+    # 2. 分析论坛情绪（先尝试LLM，失败用关键词）
+    forum_metrics, forum_score = analyze_forum_sentiment_with_llm(
+        posts, stock_name, market_cap, llm_provider
+    )
 
     # 3. 分析交易情绪
     trading_metrics, trading_score = analyze_trading_sentiment(stock_code)
 
-    # 4. 使用LLM进行深层论坛情绪分析（补充关键词法）
-    llm_forum_score = forum_score
-    try:
-        # 复用V2的LLM分析逻辑，但仅针对论坛帖子
-        forum_posts = [p for p in posts if p.get('source_type') == 'forum']
-        if forum_posts:
-            from emotion_v2 import build_emotion_prompt, parse_llm_response
-            prompt = build_emotion_prompt(forum_posts[:25], stock_name, market_cap)
-            analyzer = StockAnalyzer(llm_provider)
-            llm_result = llm_provider.chat([{"role": "user", "content": prompt}],
-                                            temperature=0.4, max_tokens=1500)
-
-            if llm_result:
-                parsed = parse_llm_response(llm_result)
-                if parsed:
-                    llm_forum_score = parsed.get('overall_sentiment_score', forum_score)
-                    logger.info(f"LLM论坛情绪分数: {llm_forum_score:.3f}")
-                    forum_score = (forum_score * 0.4 + llm_forum_score * 0.6)  # LLM权重更高
-
-    except Exception as e:
-        logger.debug(f"LLM论坛情绪分析异常: {e}")
-
-    # 5. 计算加权综合分数
+    # 4. 计算加权综合分数
     final_score, rating_level, rating_emoji = calculate_combined_emotion(
         news_score=news_score,
         forum_score=forum_score,
@@ -258,7 +333,7 @@ def analyze_emotion_v3(
         trading_weight=trading_weight
     )
 
-    # 6. 计算置信度
+    # 5. 计算置信度
     confidence_factors = []
     if news_metrics.total_news >= 5:
         confidence_factors.append(0.9)
@@ -320,21 +395,3 @@ def emotion_score_v3_to_dict(score: EmotionScoreV3) -> Dict:
     if score.trading_metrics:
         data['trading_metrics'] = asdict(score.trading_metrics)
     return data
-
-
-if __name__ == "__main__":
-    # 简单测试
-    test_posts = [
-        {"title": "这只股票要涨了", "source_type": "forum", "read_count": 1000, "reply_count": 50},
-        {"title": "赶紧卖，要跌停了", "source_type": "forum", "read_count": 800, "reply_count": 30},
-        {"title": "公司发布利好公告", "source_type": "news", "read_count": 500, "reply_count": 10},
-    ]
-
-    # 测试单独分析
-    news_metrics, news_score = analyze_news_sentiment(test_posts)
-    print(f"新闻情绪: {news_score}")
-    print(asdict(news_metrics))
-
-    forum_metrics, forum_score = analyze_forum_sentiment(test_posts)
-    print(f"\n论坛情绪: {forum_score}")
-    print(asdict(forum_metrics))

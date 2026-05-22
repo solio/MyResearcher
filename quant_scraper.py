@@ -185,7 +185,17 @@ class QuantScraper:
             # 成交量指标
             metrics.volume = q.get('f47')  # 成交量（手）
             metrics.turnover_rate = self._parse_price_value(q.get('f168'))  # 换手率
-            metrics.volume_ratio = self._parse_price_value(q.get('f163'))  # 量比
+            # 量比：f163是乘以1000的格式，但可能为负需要处理
+            vol_ratio_val = q.get('f163')
+            if vol_ratio_val is not None:
+                try:
+                    # 量比应该是正数，如果是负数可能字段映射问题
+                    val = float(vol_ratio_val)
+                    if val < 0:
+                        val = abs(val)
+                    metrics.volume_ratio = val / 1000.0
+                except (ValueError, TypeError):
+                    metrics.volume_ratio = None
 
             # 盘口指标
             metrics.inner_market = q.get('f48')  # 内盘
@@ -225,11 +235,12 @@ class QuantScraper:
             parts = latest.split(',')
 
             if len(parts) >= 13:
-                metrics.main_net_inflow = self._parse_float(parts[1])  # 主力净流入
-                metrics.super_large_net_inflow = self._parse_float(parts[5])  # 超大单
-                metrics.large_net_inflow = self._parse_float(parts[3])  # 大单
-                metrics.medium_net_inflow = self._parse_float(parts[7])  # 中单
-                metrics.small_net_inflow = self._parse_float(parts[9])  # 小单
+                # 资金流向单位是元，转换成万元
+                metrics.main_net_inflow = self._parse_float(parts[1]) / 10000.0 if parts[1] else None  # 主力净流入
+                metrics.super_large_net_inflow = self._parse_float(parts[5]) / 10000.0 if parts[5] else None  # 超大单
+                metrics.large_net_inflow = self._parse_float(parts[3]) / 10000.0 if parts[3] else None  # 大单
+                metrics.medium_net_inflow = self._parse_float(parts[7]) / 10000.0 if parts[7] else None  # 中单
+                metrics.small_net_inflow = self._parse_float(parts[9]) / 10000.0 if parts[9] else None  # 小单
 
             logger.debug(f"获取{stock_code}资金流向数据成功")
 
@@ -311,17 +322,17 @@ class QuantScraper:
                 turnover_score = 0
             factors.append(("turnover", turnover_score, 0.1))
 
-        # 4. 资金流向 (权重0.3)
+        # 4. 资金流向 (权重0.3) - 单位是万元
         if metrics.main_net_inflow is not None:
-            if metrics.main_net_inflow > 1000:
+            if metrics.main_net_inflow > 10000:
                 capital_score = 1.5  # 大幅流入
-            elif metrics.main_net_inflow > 500:
+            elif metrics.main_net_inflow > 5000:
                 capital_score = 0.8  # 中等流入
             elif metrics.main_net_inflow > 0:
                 capital_score = 0.3  # 小幅流入
-            elif metrics.main_net_inflow > -500:
+            elif metrics.main_net_inflow > -5000:
                 capital_score = -0.3  # 小幅流出
-            elif metrics.main_net_inflow > -1000:
+            elif metrics.main_net_inflow > -10000:
                 capital_score = -0.8  # 中等流出
             else:
                 capital_score = -1.5  # 大幅流出
@@ -361,15 +372,13 @@ class QuantScraper:
         return metrics
 
     def _parse_price_value(self, value) -> Optional[float]:
-        """解析价格数值，处理可能的单位格式"""
+        """解析价格数值，东方财富数据是乘以100的格式"""
         if value is None:
             return None
         try:
-            # 如果是整数，可能需要除以100或1000来得到正确的价格
-            if isinstance(value, int) and value > 10000:
-                # 东方财富API价格通常是除以100的格式
-                return value / 100.0
-            return float(value)
+            # 东方财富API价格都是乘以100的格式
+            # 例如：1504 -> 15.04, 169 -> 1.69
+            return float(value) / 100.0
         except (ValueError, TypeError):
             return None
 
