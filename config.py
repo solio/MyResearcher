@@ -101,6 +101,11 @@ class Config:
         self.OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./output")
         self.LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
+        # ========== 历史对比配置 ==========
+        # 历史对比起始日期，格式YYYYMMDD，早于此日期的数据不参与对比
+        # 留空表示不限制，使用所有历史数据
+        self.HISTORY_START_DATE = os.getenv("HISTORY_START_DATE", "")
+
         # 确保输出目录存在
         os.makedirs(self.OUTPUT_DIR, exist_ok=True)
 

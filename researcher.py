@@ -13,6 +13,7 @@ from searcher import TavilySearchProvider, StockSearcher, NewsDeduplicator
 from llm import DeepSeekLLMProvider, StockAnalyzer
 from emotion import EmotionAnalyzer, PostData, PostType
 from emotion_v2 import EmotionScoreV2
+from emotion_v3 import EmotionScoreV3
 from logger import get_logger
 from console import print_warning
 
@@ -48,6 +49,10 @@ class ResearchResult:
         self.use_v2_emotion: bool = False  # 是否使用V2版本
         self.emotion_v2: Optional[EmotionScoreV2] = None  # V2评分结果
 
+        # V3 多维度情绪分析
+        self.use_v3_emotion: bool = False  # 是否使用V3版本
+        self.emotion_v3: Optional[EmotionScoreV3] = None  # V3评分结果
+
     def to_dict(self) -> Dict:
         """转换为字典"""
         result_dict = {
@@ -69,19 +74,53 @@ class ResearchResult:
             from dataclasses import asdict
             result_dict["emotion_v2"] = asdict(self.emotion_v2)
 
+        # 添加V3情绪分析数据
+        if self.use_v3_emotion and self.emotion_v3:
+            from dataclasses import asdict
+            import emotion_v3
+            result_dict["emotion_v3"] = emotion_v3.emotion_score_v3_to_dict(self.emotion_v3)
+
         return result_dict
 
 
 class HistoryManager:
     """历史结果管理器"""
 
-    def __init__(self, output_dir: str):
+    def __init__(self, output_dir: str, history_start_date: str = ""):
+        """
+        初始化历史管理器
+
+        Args:
+            output_dir: 输出目录
+            history_start_date: 历史对比起始日期，格式YYYYMMDD，早于此日期的不参与对比
+        """
         self.output_dir = output_dir
+        self.history_start_date = history_start_date.strip()
 
     def get_yesterday_date_str(self) -> Optional[str]:
         """获取昨天的日期字符串"""
         yesterday = datetime.now() - timedelta(days=1)
         return yesterday.strftime("%Y%m%d")
+
+    def _is_before_start_date(self, date_str: str) -> bool:
+        """
+        检查日期是否在起始日期之前
+
+        Args:
+            date_str: 日期字符串，格式YYYYMMDD
+
+        Returns:
+            是否在起始日期之前
+        """
+        if not self.history_start_date:
+            return False
+
+        try:
+            date_val = int(date_str)
+            start_val = int(self.history_start_date)
+            return date_val < start_val
+        except (ValueError, TypeError):
+            return False
 
     def _find_latest_data_file(self, date_str: str) -> Optional[str]:
         """找到指定日期最新的数据文件"""
@@ -110,10 +149,15 @@ class HistoryManager:
             target_name: 研究目标名称
 
         Returns:
-            摘要字符串，找不到返回 None
+            摘要字符串，找不到或早于起始日期返回 None
         """
         yesterday = self.get_yesterday_date_str()
         if not yesterday:
+            return None
+
+        # 检查是否在起始日期之前
+        if self._is_before_start_date(yesterday):
+            logger.debug(f"昨日({yesterday})早于历史起始日期({self.history_start_date})，跳过历史对比")
             return None
 
         data_file = self._find_latest_data_file(yesterday)
@@ -193,7 +237,10 @@ class StockResearcher:
         # 初始化情绪分析器
         self.emotion_analyzer = EmotionAnalyzer(config)
 
-        self.history_manager = HistoryManager(config.OUTPUT_DIR)
+        self.history_manager = HistoryManager(
+            config.OUTPUT_DIR,
+            history_start_date=getattr(config, "HISTORY_START_DATE", "")
+        )
         self.results = []
         self.today_str = datetime.now().strftime("%Y%m%d")
         self.now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -282,36 +329,67 @@ class StockResearcher:
                 if llm_suggestion:
                     result.param_suggestion += f"【LLM调整建议】\n{llm_suggestion}\n"
 
-                # 4.5 V2 精细情绪分析（7级评分）
-                result.use_v2_emotion = True
+                # 4.5 V3 多维度情绪分析（新闻/论坛/交易）
+                result.use_v3_emotion = True
                 logger.info("=" * 60)
-                logger.info("开始 V2 7级精细情绪分析")
+                logger.info("开始 V3 多维度情绪分析")
                 logger.info("=" * 60)
 
-                # 分离帖子和新闻
-                forum_posts = [p for p in result.news_list if p.get("source_type") == "forum"]
-
-                # 调用新的V2分析函数
-                import emotion_v2
-                result.emotion_v2 = emotion_v2.analyze_emotion_v2(
-                    posts=forum_posts,
+                # 调用新的V3分析函数
+                import emotion_v3
+                result.emotion_v3 = emotion_v3.analyze_emotion_v3(
+                    posts=result.news_list,
                     stock_name=stock["name"],
                     stock_code=stock["code"],
                     market_cap=stock.get("market_cap", 100.0),
-                    llm_provider=self.llm_provider
+                    llm_provider=self.llm_provider,
+                    news_weight=0.2,
+                    forum_weight=0.5,
+                    trading_weight=0.3
                 )
 
-                if result.emotion_v2:
-                    # 更新结果中的情绪值（使用V2评分，归一化到-1~1范围）
-                    result.emotion_score = result.emotion_v2.final_score / 3.0
+                if result.emotion_v3:
+                    # 更新结果中的情绪值（使用V3评分，归一化到-1~1范围）
+                    result.emotion_score = result.emotion_v3.final_score / 3.0
 
-                    logger.info(f"V2 情绪分析完成: {result.emotion_v2.rating_emoji} {result.emotion_v2.rating_level} "
-                              f"({result.emotion_v2.final_score:.3f})")
-                    logger.info(f"置信度: {result.emotion_v2.confidence:.1%}")
+                    logger.info(f"V3 情绪分析完成: {result.emotion_v3.rating_emoji} {result.emotion_v3.rating_level}")
+                    logger.info(f"  - 新闻分数: {result.emotion_v3.news_score:.3f} (0.2)")
+                    logger.info(f"  - 论坛分数: {result.emotion_v3.forum_score:.3f} (0.5)")
+                    logger.info(f"  - 交易分数: {result.emotion_v3.trading_score:.3f} (0.3)")
+                    logger.info(f"  - 综合分数: {result.emotion_v3.final_score:.3f}")
+                    logger.info(f"  - 置信度: {result.emotion_v3.confidence:.1%}")
                     logger.info("=" * 60)
                 else:
-                    logger.warning("V2 情绪分析失败，继续使用V1版本")
-                    result.use_v2_emotion = False
+                    logger.warning("V3 情绪分析失败，回退到V2版本")
+                    result.use_v3_emotion = False
+
+                    # 回退到V2
+                    result.use_v2_emotion = True
+                    logger.info("=" * 60)
+                    logger.info("开始 V2 7级精细情绪分析（回退）")
+                    logger.info("=" * 60)
+
+                    # 分离帖子和新闻
+                    forum_posts = [p for p in result.news_list if p.get("source_type") == "forum"]
+
+                    # 调用新的V2分析函数
+                    import emotion_v2
+                    result.emotion_v2 = emotion_v2.analyze_emotion_v2(
+                        posts=forum_posts,
+                        stock_name=stock["name"],
+                        stock_code=stock["code"],
+                        market_cap=stock.get("market_cap", 100.0),
+                        llm_provider=self.llm_provider
+                    )
+
+                    if result.emotion_v2:
+                        result.emotion_score = result.emotion_v2.final_score / 3.0
+                        logger.info(f"V2 情绪分析完成: {result.emotion_v2.rating_emoji} {result.emotion_v2.rating_level} "
+                                  f"({result.emotion_v2.final_score:.3f})")
+                        logger.info("=" * 60)
+                    else:
+                        logger.warning("V2 情绪分析也失败，继续使用V1版本")
+                        result.use_v2_emotion = False
 
                 # 5. LLM深度分析（带情绪值）
                 emotion_score_for_llm = result.emotion_score
@@ -604,8 +682,55 @@ class StockResearcher:
 
             # 情绪指标
             if result.target_type == "stock":
-                if result.use_v2_emotion and result.emotion_v2:
-                    # V2 精细情绪分析显示
+                if result.use_v3_emotion and result.emotion_v3:
+                    # V3 多维度情绪分析显示
+                    md += "### 情绪指标 V3 (多维度加权评分)\n\n"
+                    md += f"- 最终评分: **{result.emotion_v3.final_score:.3f}**\n"
+                    md += f"- 情绪评级: {result.emotion_v3.rating_emoji} {result.emotion_v3.rating_level}\n"
+                    md += f"- 置信度: {result.emotion_v3.confidence:.1%}\n\n"
+
+                    md += "#### 维度明细\n\n"
+                    md += f"- 📰 新闻情绪: {result.emotion_v3.news_score:.3f} (权重 0.2)\n"
+                    md += f"- 💬 论坛情绪: {result.emotion_v3.forum_score:.3f} (权重 0.5)\n"
+                    md += f"- 📊 交易情绪: {result.emotion_v3.trading_score:.3f} (权重 0.3)\n\n"
+
+                    if result.emotion_v3.news_metrics:
+                        md += "#### 新闻统计\n\n"
+                        nm = result.emotion_v3.news_metrics
+                        md += f"- 总新闻数: {nm.total_news}\n"
+                        md += f"- 正面新闻: {nm.positive_news}\n"
+                        md += f"- 负面新闻: {nm.negative_news}\n"
+                        md += f"- 中性新闻: {nm.neutral_news}\n\n"
+
+                    if result.emotion_v3.forum_metrics:
+                        md += "#### 论坛统计\n\n"
+                        fm = result.emotion_v3.forum_metrics
+                        md += f"- 总帖子数: {fm.total_posts}\n"
+                        md += f"- 热帖数: {fm.hot_posts}\n"
+                        md += f"- 爆值帖数: {fm.explosive_posts}\n"
+                        md += f"- 看多帖: {fm.bullish_posts}\n"
+                        md += f"- 看空帖: {fm.bearish_posts}\n"
+                        md += f"- 总互动数: {fm.total_interactions}\n\n"
+
+                    if result.emotion_v3.trading_metrics:
+                        md += "#### 交易指标\n\n"
+                        tm = result.emotion_v3.trading_metrics
+                        if tm.current_price is not None:
+                            md += f"- 当前价格: {tm.current_price}\n"
+                        if tm.price_change_pct is not None:
+                            md += f"- 涨跌幅: {tm.price_change_pct:.2%}\n"
+                        if tm.volume_ratio is not None:
+                            md += f"- 量比: {tm.volume_ratio:.2f}\n"
+                        if tm.turnover_rate is not None:
+                            md += f"- 换手率: {tm.turnover_rate:.2f}%\n"
+                        if tm.main_net_inflow is not None:
+                            md += f"- 主力净流入: {tm.main_net_inflow:.0f}万\n"
+                        if tm.trading_signal:
+                            md += f"- 交易信号: {tm.trading_signal}\n"
+                        md += "\n"
+
+                elif result.use_v2_emotion and result.emotion_v2:
+                    # V2 精细情绪分析显示（备用）
                     md += "### 情绪指标 V2 (7级精细评分)\n\n"
                     md += f"- 最终评分: **{result.emotion_v2.final_score:.3f}**\n"
                     md += f"- 情绪评级: {result.emotion_v2.rating_emoji} {result.emotion_v2.rating_level}\n"
