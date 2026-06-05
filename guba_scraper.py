@@ -350,19 +350,37 @@ class GubaScraper:
             logger.debug(f"获取帖子详情失败: {e}")
             return None
 
-    def scrape_stock_posts(self, stock_code: str, max_pages: int = 10) -> List[Dict]:
+    def scrape_stock_posts(self, stock_code: str, max_pages: int = 10,
+                           target_date: str = None) -> List[Dict]:
         """
         爬取某只股票的股吧帖子
 
         Args:
             stock_code: 股票代码
             max_pages: 最大爬取页数
+            target_date: 目标日期，格式YYYYMMDD。指定时仅返回该日期及之前的帖子，
+                         自动增加翻页数直到找到目标日期的内容。
 
         Returns:
             帖子列表
         """
         all_posts = []
         seen_urls = set()
+        target_dt = None
+
+        if target_date:
+            target_dt = datetime.strptime(target_date, "%Y%m%d")
+            # 目标日期越久远，需要的翻页数越多（每页约20-30条帖子）
+            days_ago = (datetime.now() - target_dt).days
+            if days_ago > 0:
+                scaled_pages = max_pages + days_ago * 3
+                max_pages = min(scaled_pages, 50)  # 最多50页
+                logger.info(f"指定日期 {target_date}（{days_ago}天前），翻页数调整为 {max_pages}")
+
+            target_date_str = target_dt.strftime("%Y-%m-%d")
+
+        found_target_date = False  # 是否已找到目标日期的帖子
+        gone_past_target = False   # 是否已翻过目标日期（帖子早于目标日期）
 
         for page in range(1, max_pages + 1):
             logger.info(f"正在爬取第 {page}/{max_pages} 页...")
@@ -378,14 +396,40 @@ class GubaScraper:
                 logger.info(f"第{page}页未找到帖子，可能已到最后一页")
                 break
 
-            # 去重并添加
+            # 去重并添加（带日期过滤）
             new_count = 0
+            page_has_target_date = False
+            page_oldest_time = None
+
             for post in posts:
                 url = post.get("url", "")
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    all_posts.append(post)
-                    new_count += 1
+                if url and url in seen_urls:
+                    continue
+                seen_urls.add(url)
+
+                post_time_str = post.get("post_time")
+                if post_time_str and target_dt:
+                    try:
+                        post_dt = datetime.strptime(post_time_str, "%Y-%m-%d %H:%M:%S")
+                        post_date_str = post_dt.strftime("%Y-%m-%d")
+
+                        # 跟踪本页最老的帖子时间
+                        if page_oldest_time is None or post_dt < page_oldest_time:
+                            page_oldest_time = post_dt
+
+                        # 跳过晚于目标日期的帖子
+                        if post_date_str > target_date_str:
+                            continue
+
+                        # 检测是否到达目标日期
+                        if post_date_str == target_date_str:
+                            page_has_target_date = True
+                            found_target_date = True
+                    except ValueError:
+                        pass
+
+                all_posts.append(post)
+                new_count += 1
 
             logger.info(f"第{page}页新增 {new_count} 个帖子，累计 {len(all_posts)} 个")
 
@@ -393,12 +437,28 @@ class GubaScraper:
             if page < max_pages:
                 time.sleep(1)
 
-            # 简单终止条件：如果本页新帖子太少，可能是重复内容
-            if new_count < 3 and page > 3:
-                logger.info("新帖子太少，提前终止爬取")
-                break
+            # 终止条件判断
+            if target_dt:
+                # 如果本页最老的帖子已经早于目标日期，说明已翻过目标日期，可以停止
+                if page_oldest_time and page_oldest_time.strftime("%Y-%m-%d") < target_date_str:
+                    logger.info(f"已翻过目标日期 {target_date_str}（本页最老: {page_oldest_time.strftime('%Y-%m-%d')}），停止爬取")
+                    gone_past_target = True
+                    break
 
-        logger.info(f"爬取完成，共获取 {len(all_posts)} 个帖子")
+                # 如果已经找到目标日期且本页没有目标日期的帖子，
+                # 且本页最老帖子已经是更早的日期，也停止
+                if found_target_date and not page_has_target_date:
+                    if page_oldest_time and page_oldest_time.strftime("%Y-%m-%d") < target_date_str:
+                        logger.info(f"已找到目标日期且已翻过，停止爬取")
+                        break
+            else:
+                # 无目标日期时：新帖子太少就停
+                if new_count < 3 and page > 3:
+                    logger.info("新帖子太少，提前终止爬取")
+                    break
+
+        logger.info(f"爬取完成，共获取 {len(all_posts)} 个帖子"
+                    f"{f'（目标日期: {target_date}）' if target_date else ''}")
         return all_posts
 
 

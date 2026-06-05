@@ -445,7 +445,8 @@ class StockSearcher:
                  search_engine_path: str = "../search-engine",
                  skill_use_targeted: bool = False,
                  skill_use_mock: bool = False,
-                 config = None):
+                 config = None,
+                 target_date: str = None):
         """
         初始化
 
@@ -461,6 +462,8 @@ class StockSearcher:
             skill_use_targeted: skill是否使用定向搜索
             skill_use_mock: skill是否使用mock模式
             config: 配置对象（可选，用于股吧爬虫）
+            target_date: 目标调研日期，格式YYYYMMDD。指定后股吧精确过滤，
+                        新闻和雪球搜索添加日期关键词以尽量匹配。
         """
         if search_provider:
             self.provider = search_provider
@@ -482,6 +485,10 @@ class StockSearcher:
         self.time_range_days = time_range_days
         self.enable_cleanup = enable_cleanup
         self.config = config
+        self.target_date = target_date
+
+        # 预计算日期关键词（用于搜索query增强）
+        self._date_keywords = self._build_date_keywords(target_date) if target_date else ""
 
         # 初始化股吧爬虫
         self.guba_scraper = None
@@ -491,6 +498,14 @@ class StockSearcher:
                 logger.info("股吧爬虫已初始化")
             except Exception as e:
                 logger.warning(f"股吧爬虫初始化失败: {e}")
+
+    def _build_date_keywords(self, target_date: str) -> str:
+        """根据目标日期构建搜索关键词片段"""
+        try:
+            dt = datetime.strptime(target_date, "%Y%m%d")
+            return f"{dt.year}年{dt.month}月{dt.day}日"
+        except ValueError:
+            return ""
 
     def _multi_query_search(self, queries: List[str], max_results_per_query: int = 3) -> List[Dict]:
         """
@@ -543,7 +558,10 @@ class StockSearcher:
             try:
                 logger.info(f"使用股吧爬虫搜索: {stock_name}({stock_code})")
                 guba_max_pages = getattr(self.config, 'GUBA_MAX_PAGES', 10) if self.config else 10
-                guba_results = self.guba_scraper.scrape_stock_posts(stock_code, max_pages=guba_max_pages)
+                guba_results = self.guba_scraper.scrape_stock_posts(
+                    stock_code, max_pages=guba_max_pages,
+                    target_date=self.target_date
+                )
 
                 # 股吧帖子已经是forum类型
                 for r in guba_results:
@@ -579,6 +597,13 @@ class StockSearcher:
                 f"{stock_name} {stock_code} 研报 site:stock.finance.sina.com.cn",
             ]
 
+            # 指定日期时，添加带日期关键词的搜索query
+            if self._date_keywords:
+                news_queries.extend([
+                    f"{stock_name} {self._date_keywords} 新闻",
+                    f"{stock_name} {self._date_keywords} 公告",
+                ])
+
             search_results = self._multi_query_search(news_queries, max_results_per_query=8)
             all_news.extend(search_results)
 
@@ -591,6 +616,13 @@ class StockSearcher:
                     f"{stock_name} 雪球 分析",
                     f"{stock_name} 股民 分析",
                 ]
+
+                # 指定日期时，添加带日期关键词的雪球搜索
+                if self._date_keywords:
+                    forum_queries.extend([
+                        f"site:xueqiu.com {stock_name} {self._date_keywords}",
+                        f"{stock_name} 雪球 {self._date_keywords}",
+                    ])
                 forum_results = self._multi_query_search(forum_queries, max_results_per_query=4)
                 for r in forum_results:
                     r["source_type"] = "forum"
@@ -652,6 +684,13 @@ class StockSearcher:
             f"{industry_name} 新闻 site:eastmoney.com",
         ]
 
+        # 指定日期时，添加带日期关键词的搜索query
+        if self._date_keywords:
+            news_queries.extend([
+                f"{industry_name} {self._date_keywords} 新闻",
+                f"{industry_name} {self._date_keywords} 行业",
+            ])
+
         all_news = self._multi_query_search(news_queries, max_results_per_query=8)  # 增加单query结果量
 
         # 搜索论坛讨论
@@ -661,6 +700,8 @@ class StockSearcher:
                 f"{industry_name} 投资讨论",
                 f"{industry_name} 股吧 热议",
             ]
+            if self._date_keywords:
+                forum_queries.append(f"{industry_name} 雪球 {self._date_keywords}")
             forum_results = self._multi_query_search(forum_queries, max_results_per_query=6)  # 增加单query结果量
             for r in forum_results:
                 r["source_type"] = "forum"

@@ -16,6 +16,7 @@ from emotion_v2 import EmotionScoreV2
 from emotion_v3 import EmotionScoreV3
 from logger import get_logger
 from console import print_warning
+from score_tracer import ScoreTracer
 
 logger = get_logger()
 
@@ -52,6 +53,9 @@ class ResearchResult:
         # V3 多维度情绪分析
         self.use_v3_emotion: bool = False  # 是否使用V3版本
         self.emotion_v3: Optional[EmotionScoreV3] = None  # V3评分结果
+
+        # 评分计算追踪器
+        self.tracer: Optional[ScoreTracer] = None
 
     def to_dict(self) -> Dict:
         """转换为字典"""
@@ -198,27 +202,44 @@ class HistoryManager:
 class StockResearcher:
     """个股投研器"""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, target_date: str = None):
         """
         初始化投研器
 
         Args:
             config: 配置对象
+            target_date: 目标调研日期，格式YYYYMMDD。指定后所有搜索限
+                        定在该日期范围，输出保存到该日期目录。
         """
         self.config = config
+        self.target_date = target_date
+
+        # 计算搜索时间范围
+        if target_date:
+            target_dt = datetime.strptime(target_date, "%Y%m%d")
+            days_diff = (datetime.now() - target_dt).days
+            time_range_days = max(days_diff + 1, 1)
+            self.today_str = target_date
+            logger.info(f"指定调研日期: {target_date}（{days_diff}天前），时间范围: {time_range_days}天")
+        else:
+            time_range_days = config.SEARCH_TIME_RANGE_DAYS
+            self.today_str = datetime.now().strftime("%Y%m%d")
+
+        self.now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # 初始化搜索提供者
         self.searcher = StockSearcher(
             search_provider_type=config.SEARCH_PROVIDER,
             enable_forum=config.ENABLE_FORUM_SEARCH,
-            time_range_days=config.SEARCH_TIME_RANGE_DAYS,
+            time_range_days=time_range_days,
             enable_cleanup=config.ENABLE_CONTENT_CLEANUP,
             tavily_api_key=config.TAVILY_API_KEY,
             tavily_time_range_days=config.TAVILY_SEARCH_TIME_RANGE_DAYS,
             search_engine_path=config.SEARCH_ENGINE_PATH,
             skill_use_targeted=config.SKILL_USE_TARGETED,
             skill_use_mock=config.SKILL_USE_MOCK,
-            config=config
+            config=config,
+            target_date=target_date
         )
 
         # 记录使用的搜索提供者类型，用于区分数据保存方式
@@ -242,8 +263,6 @@ class StockResearcher:
             history_start_date=getattr(config, "HISTORY_START_DATE", "")
         )
         self.results = []
-        self.today_str = datetime.now().strftime("%Y%m%d")
-        self.now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     def research_stock(self, stock: Dict) -> ResearchResult:
         """
@@ -259,6 +278,8 @@ class StockResearcher:
         logger.info(f"正在研究股票: {target_name}")
 
         result = ResearchResult("stock", target_name)
+        tracer = ScoreTracer(target_name, "stock")
+        result.tracer = tracer
 
         try:
             # 1. 搜索新闻
@@ -289,9 +310,13 @@ class StockResearcher:
             if result.news_list and not has_warning:
                 # 分类帖子
                 result.classified_posts = self.emotion_analyzer.classify_posts(result.news_list, stock)
+                tracer.record_classification(result.news_list,
+                                             result.classified_posts,
+                                             self.config)
 
                 # 分离出需要分析的帖子
                 emotion_posts = [p for p in result.classified_posts if p.post_type]
+                emotion_map = {}
 
                 if emotion_posts:
                     # 批量分析情绪（节省token）
@@ -302,8 +327,11 @@ class StockResearcher:
                     for i, post in enumerate(emotion_posts):
                         post.emotion_score = emotion_map.get(i, 0.0)
 
+                tracer.record_emotion_map(emotion_map if emotion_posts else {})
+
                 # 计算综合情绪值
                 result.emotion_score = self.emotion_analyzer.calculate_emotion_score(result.classified_posts, stock)
+                tracer.record_v1_score(result.emotion_score)
 
                 # 记录每日统计
                 self.emotion_analyzer.record_stock_daily_stats(stock["code"], result.classified_posts, self.today_str)
@@ -351,6 +379,10 @@ class StockResearcher:
                 if result.emotion_v3:
                     # 更新结果中的情绪值（使用V3评分，归一化到-1~1范围）
                     result.emotion_score = result.emotion_v3.final_score / 3.0
+                    tracer.record_v3_result(
+                        result.emotion_v3,
+                        news_weight=0.2, forum_weight=0.5, trading_weight=0.3
+                    )
 
                     logger.info(f"V3 情绪分析完成: {result.emotion_v3.rating_emoji} {result.emotion_v3.rating_level}")
                     logger.info(f"  - 新闻分数: {result.emotion_v3.news_score:.3f} (0.2)")
@@ -384,6 +416,7 @@ class StockResearcher:
 
                     if result.emotion_v2:
                         result.emotion_score = result.emotion_v2.final_score / 3.0
+                        tracer.record_v2_result(result.emotion_v2)
                         logger.info(f"V2 情绪分析完成: {result.emotion_v2.rating_emoji} {result.emotion_v2.rating_level} "
                                   f"({result.emotion_v2.final_score:.3f})")
                         logger.info("=" * 60)
@@ -479,44 +512,120 @@ class StockResearcher:
 
         return result
 
-    def run_all(self) -> List[ResearchResult]:
+    def run_all(self, start_from: str = None) -> List[ResearchResult]:
         """
-        运行所有研究任务（出错继续）
+        运行所有研究任务（出错继续）。
+        每个标的分析完成后立即写入文件，避免中途崩溃丢失结果。
+
+        Args:
+            start_from: 从指定股票代码或行业名称开始分析，跳过之前的标的。
+                       例如 "601012" 或 "光伏行业"。
 
         Returns:
             所有研究结果列表
         """
         logger.info("=" * 60)
         logger.info("开始投研任务")
+        if start_from:
+            logger.info(f"起始位置: {start_from}")
         logger.info("=" * 60)
 
-        all_results = []
+        output_dir = self.config.get_output_dir_for_date(self.today_str)
+        md_file = os.path.join(output_dir, f"{self.now_str}-纪要.md")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # 研究个股
+        # 写入纪要头部
+        with open(md_file, "w", encoding="utf-8") as f:
+            f.write(self._generate_markdown_header(timestamp))
+        logger.info(f"纪要文件已创建: {md_file}")
+
+        all_results = []
+        started = (start_from is None)
+
+        # ========== 研究个股 ==========
         logger.info("--- 研究个股 ---")
         for stock in self.config.STOCK_LIST:
+            stock_code = stock['code']
+            stock_name = stock['name']
+
+            if not started:
+                if stock_code == start_from or stock_name == start_from:
+                    started = True
+                    logger.info(f"✓ 匹配股票 {stock_name}({stock_code})，从此开始分析")
+                else:
+                    logger.info(f"跳过 {stock_name}({stock_code}) （start_from={start_from}）")
+                    continue
+
+            target_name = f"{stock_name}({stock_code})"
             try:
+                logger.info(f">>> 分析个股: {target_name}")
                 result = self.research_stock(stock)
                 all_results.append(result)
+
+                # 追加到纪要文件
+                with open(md_file, "a", encoding="utf-8") as f:
+                    f.write(self._generate_result_markdown(result))
+
+                # 增量保存JSON数据
+                self._save_data_incremental(all_results, output_dir)
+
+                logger.info(f"<<< {target_name} 分析完成，结果已写入文件")
             except Exception as e:
                 logger.error(f"研究股票异常: {stock}, error={e}", exc_info=True)
-                # 即使失败也继续下一个
 
-        # 研究行业
+        # ========== 研究行业 ==========
         logger.info("--- 研究行业 ---")
         for industry in self.config.INDUSTRY_LIST:
+            if not started:
+                if industry == start_from:
+                    started = True
+                    logger.info(f"✓ 匹配行业 {industry}，从此开始分析")
+                else:
+                    logger.info(f"跳过行业 {industry} （start_from={start_from}）")
+                    continue
+
             try:
+                logger.info(f">>> 分析行业: {industry}")
                 result = self.research_industry(industry)
                 all_results.append(result)
+
+                # 追加到纪要文件
+                with open(md_file, "a", encoding="utf-8") as f:
+                    f.write(self._generate_result_markdown(result))
+
+                # 增量保存JSON数据
+                self._save_data_incremental(all_results, output_dir)
+
+                logger.info(f"<<< {industry} 分析完成，结果已写入文件")
             except Exception as e:
                 logger.error(f"研究行业异常: {industry}, error={e}", exc_info=True)
-                # 即使失败也继续下一个
 
         # 保存情绪参数
         self.emotion_analyzer.save_params()
 
+        # 保存争议值解释
+        dispute_file = self._write_dispute_explanations(all_results)
+        if dispute_file:
+            logger.info(f"争议值解释: {dispute_file}")
+
         self.results = all_results
+        logger.info(f"所有任务完成，共 {len(all_results)} 个标的，纪要: {md_file}")
         return all_results
+
+    def _save_data_incremental(self, results: List[ResearchResult],
+                                output_dir: str) -> None:
+        """增量保存JSON数据文件（每次覆盖写入全部已分析结果）"""
+        if self.search_provider_type != "tavily":
+            return
+        data_file = os.path.join(output_dir, f"{self.now_str}-数据.json")
+        data = {
+            "date": self.today_str,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "results": [r.to_dict() for r in results],
+            "search_provider": "tavily"
+        }
+        with open(data_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
     def search_only(self) -> List[Dict]:
         """
@@ -644,7 +753,48 @@ class StockResearcher:
         logger.info(f"  - {data_file}")
         logger.info(f"  - {md_file}")
 
+        # 保存争议值解释文件
+        dispute_file = self._write_dispute_explanations(results)
+        if dispute_file:
+            logger.info(f"  - {dispute_file}")
+
         return md_file
+
+    def _write_dispute_explanations(self, results: List[ResearchResult]) -> Optional[str]:
+        """
+        为所有有零值/争议值的结果生成详细溯源文件
+
+        Args:
+            results: 研究结果列表
+
+        Returns:
+            争议值解释文件路径，无争议值时返回 None
+        """
+        dispute_results = []
+        for r in results:
+            if r.tracer and r.tracer.has_zero_values():
+                dispute_results.append(r.tracer)
+
+        if not dispute_results:
+            return None
+
+        output_dir = self.config.get_output_dir_for_date(self.today_str)
+        dispute_file = os.path.join(output_dir, "争议值解释.md")
+
+        content = "# 争议值解释\n\n"
+        content += f"> 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        content += f"> 调研日期: {self.today_str}\n\n"
+        content += "---\n\n"
+
+        for tracer in dispute_results:
+            content += tracer.generate_detail_report()
+            content += "\n---\n\n"
+
+        with open(dispute_file, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        logger.info(f"争议值解释已保存: {dispute_file}")
+        return dispute_file
 
     def _generate_markdown_report(self, results: List[ResearchResult]) -> str:
         """
@@ -657,164 +807,171 @@ class StockResearcher:
             Markdown字符串
         """
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        md = self._generate_markdown_header(timestamp)
+        for result in results:
+            md += self._generate_result_markdown(result)
+        return md
 
+    @staticmethod
+    def _generate_markdown_header(timestamp: str) -> str:
         md = f"# 个股价值投研纪要\n\n"
         md += f"生成时间: {timestamp}\n\n"
         md += "---\n\n"
+        return md
 
-        for result in results:
-            if result.target_type == "stock":
-                md += f"## 📈 个股研究: {result.target_name}\n\n"
-            else:
-                md += f"## 🏭 行业研究: {result.target_name}\n\n"
+    def _generate_result_markdown(self, result: ResearchResult) -> str:
+        """生成单个研究结果的 Markdown 段落"""
+        md = ""
+        if result.target_type == "stock":
+            md += f"## 📈 个股研究: {result.target_name}\n\n"
+        else:
+            md += f"## 🏭 行业研究: {result.target_name}\n\n"
 
-            # 无更新情况
-            if result.is_no_update:
-                md += "⚠️ 今日无重大更新，内容与上期相似。\n\n"
-                md += "---\n\n"
-                continue
-
-            # 失败情况
-            if result.failure_reason:
-                md += f"❌ 研究失败: {result.failure_reason}\n\n"
-                md += "---\n\n"
-                continue
-
-            # 情绪指标
-            if result.target_type == "stock":
-                if result.use_v3_emotion and result.emotion_v3:
-                    # V3 多维度情绪分析显示
-                    md += "### 情绪指标 V3 (多维度加权评分)\n\n"
-                    md += f"- 最终评分: **{result.emotion_v3.final_score:.3f}**\n"
-                    md += f"- 情绪评级: {result.emotion_v3.rating_emoji} {result.emotion_v3.rating_level}\n"
-                    md += f"- 置信度: {result.emotion_v3.confidence:.1%}\n\n"
-
-                    md += "#### 维度明细\n\n"
-                    md += f"- 📰 新闻情绪: {result.emotion_v3.news_score:.3f} (权重 0.2)\n"
-                    md += f"- 💬 论坛情绪: {result.emotion_v3.forum_score:.3f} (权重 0.5)\n"
-                    md += f"- 📊 交易情绪: {result.emotion_v3.trading_score:.3f} (权重 0.3)\n\n"
-
-                    if result.emotion_v3.news_metrics:
-                        md += "#### 新闻统计\n\n"
-                        nm = result.emotion_v3.news_metrics
-                        md += f"- 总新闻数: {nm.total_news}\n"
-                        md += f"- 正面新闻: {nm.positive_news}\n"
-                        md += f"- 负面新闻: {nm.negative_news}\n"
-                        md += f"- 中性新闻: {nm.neutral_news}\n\n"
-
-                    if result.emotion_v3.forum_metrics:
-                        md += "#### 论坛统计\n\n"
-                        fm = result.emotion_v3.forum_metrics
-                        md += f"- 总帖子数: {fm.total_posts}\n"
-                        md += f"- 热帖数: {fm.hot_posts}\n"
-                        md += f"- 爆值帖数: {fm.explosive_posts}\n"
-                        md += f"- 看多帖: {fm.bullish_posts}\n"
-                        md += f"- 看空帖: {fm.bearish_posts}\n"
-                        md += f"- 总互动数: {fm.total_interactions}\n\n"
-
-                    if result.emotion_v3.trading_metrics:
-                        md += "#### 交易指标\n\n"
-                        tm = result.emotion_v3.trading_metrics
-                        if tm.current_price is not None:
-                            md += f"- 当前价格: {tm.current_price:.2f}\n"
-                        if tm.price_change_pct is not None:
-                            md += f"- 涨跌幅: {tm.price_change_pct:.2f}%\n"
-                        if tm.volume_ratio is not None and tm.volume_ratio > 0:
-                            md += f"- 量比: {tm.volume_ratio:.2f}\n"
-                        if tm.turnover_rate is not None:
-                            md += f"- 换手率: {tm.turnover_rate:.2f}%\n"
-                        if tm.main_net_inflow is not None:
-                            md += f"- 主力净流入: {tm.main_net_inflow:.0f}万\n"
-                        if tm.trading_signal:
-                            md += f"- 交易信号: {tm.trading_signal}\n"
-                        md += "\n"
-
-                elif result.use_v2_emotion and result.emotion_v2:
-                    # V2 精细情绪分析显示（备用）
-                    md += "### 情绪指标 V2 (7级精细评分)\n\n"
-                    md += f"- 最终评分: **{result.emotion_v2.final_score:.3f}**\n"
-                    md += f"- 情绪评级: {result.emotion_v2.rating_emoji} {result.emotion_v2.rating_level}\n"
-                    md += f"- 置信度: {result.emotion_v2.confidence:.1%}\n\n"
-
-                    md += "#### 样本统计\n\n"
-                    md += f"- 帖子总数: {result.emotion_v2.total_posts}\n"
-                    md += f"- 新闻总数: {result.emotion_v2.total_news}\n"
-                    md += f"- 总互动数: {result.emotion_v2.total_interactions}\n"
-                    md += f"- 丰裕系数: {result.emotion_v2.abundance_coefficient:.2f}\n\n"
-
-                    if result.emotion_v2.trend_analysis:
-                        md += "#### 趋势分析\n\n"
-                        md += f"{result.emotion_v2.trend_analysis}\n\n"
-
-                    if result.emotion_v2.key_post_titles:
-                        md += "#### 关键影响帖子\n\n"
-                        for i, title in enumerate(result.emotion_v2.key_post_titles[:5], 1):
-                            md += f"{i}. {title}\n"
-                        md += "\n"
-
-                else:
-                    # V1 原始情绪分析显示（兼容）
-                    emotion_label = "中性"
-                    if result.emotion_score > 0.6:
-                        emotion_label = "😃 极度贪婪"
-                    elif result.emotion_score > 0.2:
-                        emotion_label = "🙂 贪婪"
-                    elif result.emotion_score < -0.6:
-                        emotion_label = "😱 极度恐惧"
-                    elif result.emotion_score < -0.2:
-                        emotion_label = "😟 恐惧"
-
-                    md += "### 情绪指标\n\n"
-                    md += f"- 综合情绪值: **{result.emotion_score:.3f}**\n"
-                    md += f"- 情绪标签: {emotion_label}\n\n"
-
-                    if result.classified_posts:
-                        # 统计分类
-                        xueqiu_hot = sum(1 for p in result.classified_posts if p.post_type == PostType.XUEQIU_HOT)
-                        xueqiu_explosive = sum(1 for p in result.classified_posts if p.post_type == PostType.XUEQIU_EXPLOSIVE)
-                        guba_hot = sum(1 for p in result.classified_posts if p.post_type == PostType.GUBA_HOT)
-                        guba_explosive = sum(1 for p in result.classified_posts if p.post_type == PostType.GUBA_EXPLOSIVE)
-                        guba_normal = sum(1 for p in result.classified_posts if p.post_type == PostType.GUBA_NORMAL)
-
-                        md += f"- 雪球热帖: {xueqiu_hot}\n"
-                        md += f"- 雪球爆值帖: {xueqiu_explosive}\n"
-                        md += f"- 股吧热度帖: {guba_hot}\n"
-                        md += f"- 股吧爆值帖: {guba_explosive}\n"
-                        md += f"- 股吧普通帖: {guba_normal}\n\n"
-
-                    if result.param_suggestion:
-                        md += f"### 参数调整建议\n\n"
-                        md += result.param_suggestion + "\n\n"
-
-            # 新闻列表
-            md += "### 新闻列表\n\n"
-            if result.news_list:
-                for i, news in enumerate(result.news_list, 1):
-                    if news.get("is_warning"):
-                        md += f"⚠️ **{news.get('title', '')}**\n\n"
-                        md += f"   {news.get('content', '')}\n\n"
-                    else:
-                        source_tag = "📰 新闻" if news.get("source_type") == "news" else "💬 论坛"
-                        title = news.get('title', '')
-                        url = news.get('url', '')
-                        if url:
-                            md += f"{i}. {source_tag} [{title}]({url})\n"
-                        else:
-                            md += f"{i}. {source_tag} {title}\n"
-                        content = news.get('content', '')
-                        if content:
-                            md += f"   - {content[:200]}...\n\n"
-            else:
-                md += "暂无新闻\n\n"
-
-            # 分析摘要
-            if result.analysis:
-                md += "### 分析摘要\n\n"
-                if result.analysis == "分析失败":
-                    md += "❌ 分析失败\n\n"
-                else:
-                    md += result.analysis + "\n\n"
-
+        # 无更新情况
+        if result.is_no_update:
+            md += "⚠️ 今日无重大更新，内容与上期相似。\n\n"
             md += "---\n\n"
+            return md
+
+        # 失败情况
+        if result.failure_reason:
+            md += f"❌ 研究失败: {result.failure_reason}\n\n"
+            md += "---\n\n"
+            return md
+
+        # 情绪指标
+        if result.target_type == "stock":
+            md += self._generate_emotion_section(result)
+
+        # 争议值解释（嵌入报告）
+        if result.tracer and result.tracer.has_zero_values():
+            md += result.tracer.brief_explanation()
+
+        # 新闻列表
+        md += "### 新闻列表\n\n"
+        if result.news_list:
+            for i, news in enumerate(result.news_list, 1):
+                if news.get("is_warning"):
+                    md += f"⚠️ **{news.get('title', '')}**\n\n"
+                    md += f"   {news.get('content', '')}\n\n"
+                else:
+                    source_tag = "📰 新闻" if news.get("source_type") == "news" else "💬 论坛"
+                    title = news.get('title', '')
+                    url = news.get('url', '')
+                    if url:
+                        md += f"{i}. {source_tag} [{title}]({url})\n"
+                    else:
+                        md += f"{i}. {source_tag} {title}\n"
+                    content = news.get('content', '')
+                    if content:
+                        md += f"   - {content[:200]}...\n\n"
+        else:
+            md += "暂无新闻\n\n"
+
+        # 分析摘要
+        if result.analysis:
+            md += "### 分析摘要\n\n"
+            if result.analysis == "分析失败":
+                md += "❌ 分析失败\n\n"
+            else:
+                md += result.analysis + "\n\n"
+
+        md += "---\n\n"
+        return md
+
+    @staticmethod
+    def _generate_emotion_section(result: ResearchResult) -> str:
+        """生成情绪指标段落"""
+        md = ""
+        if result.use_v3_emotion and result.emotion_v3:
+            v3 = result.emotion_v3
+            md += "### 情绪指标 V3 (多维度加权评分)\n\n"
+            md += f"- 最终评分: **{v3.final_score:.3f}**\n"
+            md += f"- 情绪评级: {v3.rating_emoji} {v3.rating_level}\n"
+            md += f"- 置信度: {v3.confidence:.1%}\n\n"
+            md += "#### 维度明细\n\n"
+            md += f"- 📰 新闻情绪: {v3.news_score:.3f} (权重 0.2)\n"
+            md += f"- 💬 论坛情绪: {v3.forum_score:.3f} (权重 0.5)\n"
+            md += f"- 📊 交易情绪: {v3.trading_score:.3f} (权重 0.3)\n\n"
+            if v3.news_metrics:
+                nm = v3.news_metrics
+                md += "#### 新闻统计\n\n"
+                md += f"- 总新闻数: {nm.total_news}\n"
+                md += f"- 正面新闻: {nm.positive_news}\n"
+                md += f"- 负面新闻: {nm.negative_news}\n"
+                md += f"- 中性新闻: {nm.neutral_news}\n\n"
+            if v3.forum_metrics:
+                fm = v3.forum_metrics
+                md += "#### 论坛统计\n\n"
+                md += f"- 总帖子数: {fm.total_posts}\n"
+                md += f"- 热帖数: {fm.hot_posts}\n"
+                md += f"- 爆值帖数: {fm.explosive_posts}\n"
+                md += f"- 看多帖: {fm.bullish_posts}\n"
+                md += f"- 看空帖: {fm.bearish_posts}\n"
+                md += f"- 总互动数: {fm.total_interactions}\n\n"
+            if v3.trading_metrics:
+                tm = v3.trading_metrics
+                md += "#### 交易指标\n\n"
+                if tm.current_price is not None:
+                    md += f"- 当前价格: {tm.current_price:.2f}\n"
+                if tm.price_change_pct is not None:
+                    md += f"- 涨跌幅: {tm.price_change_pct:.2f}%\n"
+                if tm.volume_ratio is not None and tm.volume_ratio > 0:
+                    md += f"- 量比: {tm.volume_ratio:.2f}\n"
+                if tm.turnover_rate is not None:
+                    md += f"- 换手率: {tm.turnover_rate:.2f}%\n"
+                if tm.main_net_inflow is not None:
+                    md += f"- 主力净流入: {tm.main_net_inflow:.0f}万\n"
+                if tm.trading_signal:
+                    md += f"- 交易信号: {tm.trading_signal}\n"
+                md += "\n"
+
+        elif result.use_v2_emotion and result.emotion_v2:
+            v2 = result.emotion_v2
+            md += "### 情绪指标 V2 (7级精细评分)\n\n"
+            md += f"- 最终评分: **{v2.final_score:.3f}**\n"
+            md += f"- 情绪评级: {v2.rating_emoji} {v2.rating_level}\n"
+            md += f"- 置信度: {v2.confidence:.1%}\n\n"
+            md += "#### 样本统计\n\n"
+            md += f"- 帖子总数: {v2.total_posts}\n"
+            md += f"- 新闻总数: {v2.total_news}\n"
+            md += f"- 总互动数: {v2.total_interactions}\n"
+            md += f"- 丰裕系数: {v2.abundance_coefficient:.2f}\n\n"
+            if v2.trend_analysis:
+                md += "#### 趋势分析\n\n"
+                md += f"{v2.trend_analysis}\n\n"
+            if v2.key_post_titles:
+                md += "#### 关键影响帖子\n\n"
+                for i, title in enumerate(v2.key_post_titles[:5], 1):
+                    md += f"{i}. {title}\n"
+                md += "\n"
+
+        else:
+            emotion_label = "中性"
+            if result.emotion_score > 0.6:
+                emotion_label = "😃 极度贪婪"
+            elif result.emotion_score > 0.2:
+                emotion_label = "🙂 贪婪"
+            elif result.emotion_score < -0.6:
+                emotion_label = "😱 极度恐惧"
+            elif result.emotion_score < -0.2:
+                emotion_label = "😟 恐惧"
+            md += "### 情绪指标\n\n"
+            md += f"- 综合情绪值: **{result.emotion_score:.3f}**\n"
+            md += f"- 情绪标签: {emotion_label}\n\n"
+            if result.classified_posts:
+                xueqiu_hot = sum(1 for p in result.classified_posts if p.post_type == PostType.XUEQIU_HOT)
+                xueqiu_explosive = sum(1 for p in result.classified_posts if p.post_type == PostType.XUEQIU_EXPLOSIVE)
+                guba_hot = sum(1 for p in result.classified_posts if p.post_type == PostType.GUBA_HOT)
+                guba_explosive = sum(1 for p in result.classified_posts if p.post_type == PostType.GUBA_EXPLOSIVE)
+                guba_normal = sum(1 for p in result.classified_posts if p.post_type == PostType.GUBA_NORMAL)
+                md += f"- 雪球热帖: {xueqiu_hot}\n"
+                md += f"- 雪球爆值帖: {xueqiu_explosive}\n"
+                md += f"- 股吧热度帖: {guba_hot}\n"
+                md += f"- 股吧爆值帖: {guba_explosive}\n"
+                md += f"- 股吧普通帖: {guba_normal}\n\n"
+            if result.param_suggestion:
+                md += f"### 参数调整建议\n\n"
+                md += result.param_suggestion + "\n\n"
 
         return md
