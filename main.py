@@ -73,6 +73,25 @@ def main():
         dest="start_from",
         help="从指定股票代码或行业名称开始分析，跳过之前的标的。如 --from 002407 或 --from 光伏行业。"
     )
+    parser.add_argument(
+        "--backfill",
+        type=str,
+        default=None,
+        metavar="STOCK_CODE",
+        help="回填某只股票的历史股吧/雪球数据及情绪分析。如 --backfill 601012"
+    )
+    parser.add_argument(
+        "--months",
+        type=int,
+        default=3,
+        help="回填多少个月的历史数据（默认 3）"
+    )
+    parser.add_argument(
+        "--stock-name",
+        type=str,
+        default=None,
+        help="回填股票的名称（当股票代码不在配置列表中时需要手动指定）"
+    )
 
     args = parser.parse_args()
 
@@ -87,7 +106,10 @@ def main():
             print(f"错误: 日期格式无效 '{args.date}'，请使用 YYYYMMDD 格式，如 20260527")
             sys.exit(1)
 
-    if args.mode == "once":
+    if args.backfill:
+        from backfill import backfill_main
+        backfill_main(args)
+    elif args.mode == "once":
         run_once(target_date=target_date, start_from=args.start_from)
     elif args.mode == "searchOnly":
         run_search_only(target_date=target_date)

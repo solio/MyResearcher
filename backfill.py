@@ -1,0 +1,519 @@
+"""
+个股历史数据回填模块
+补齐过去几个月的股吧/雪球数据 + V3情绪分析
+"""
+import os
+import json
+import time
+import requests
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional
+
+from config import get_config, Config
+from logger import get_logger
+from console import print_warning
+
+logger = get_logger()
+
+
+class HistoricalPriceFetcher:
+    """东方财富 K 线历史数据获取器"""
+
+    KLINE_URL = "http://push2his.eastmoney.com/api/qt/stock/kline/get"
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://quote.eastmoney.com/",
+        })
+
+    def fetch_kline(self, stock_code: str, beg: str, end: str) -> dict:
+        """
+        获取历史 K 线数据
+
+        Args:
+            stock_code: 股票代码
+            beg: 开始日期 YYYYMMDD
+            end: 结束日期 YYYYMMDD
+
+        Returns:
+            {"trading_days": ["20260302", ...],
+             "prices": {"20260302": {"open": ..., "close": ..., ...}}}
+        """
+        market = 1 if stock_code.startswith("6") else 0
+        secid = f"{market}.{stock_code}"
+
+        params = {
+            "secid": secid,
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+            "klt": "101",      # 日K线
+            "fqt": "1",        # 前复权
+            "beg": beg,
+            "end": end,
+            "lmt": "200",
+        }
+
+        try:
+            resp = self.session.get(self.KLINE_URL, params=params, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            logger.error(f"获取 K 线数据失败: {e}")
+            return {"trading_days": [], "prices": {}}
+
+        klines = data.get("data", {}).get("klines", [])
+        if not klines:
+            logger.warning(f"K 线 API 返回空数据: {stock_code} {beg}~{end}")
+            return {"trading_days": [], "prices": {}}
+
+        prices = {}
+        trading_days = []
+        for line in klines:
+            parts = line.split(",")
+            # 格式: date,open,close,high,low,volume,amount,amplitude,
+            #        pct_change,change,turnover
+            date_str = parts[0]  # "2026-03-02"
+            if date_str == beg or date_str == end:
+                continue  # 跳过边界值（可能是 API 占位）
+            day_key = date_str.replace("-", "")  # → "20260302"
+            try:
+                prices[day_key] = {
+                    "open": float(parts[1]),
+                    "close": float(parts[2]),
+                    "high": float(parts[3]),
+                    "low": float(parts[4]),
+                    "volume": int(parts[5]),
+                    "amount": float(parts[6]),
+                    "pct_change": float(parts[8]) if parts[8] and parts[8] != "-" else 0.0,
+                    "turnover": float(parts[10]) if len(parts) > 10 and parts[10] and parts[10] != "-" else None,
+                }
+                trading_days.append(day_key)
+            except (ValueError, IndexError):
+                continue
+
+        return {"trading_days": trading_days, "prices": prices}
+
+
+class XueqiuScraper:
+    """雪球论坛直接爬取器（不依赖 Tavily）
+
+    注意：雪球主站有 WAF 保护 + 登录校验，直接 API 调用可能被拦截。
+    回填以股吧数据为主要来源，雪球作为尽力而为的补充。
+    """
+
+    SEARCH_URL = "https://xueqiu.com/statuses/search.json"
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://xueqiu.com/",
+        })
+
+    def _init_cookies(self):
+        """访问首页获取基础 cookie"""
+        try:
+            self.session.get("https://xueqiu.com/", timeout=10)
+        except Exception:
+            pass
+
+    def search_posts(self, stock_code: str, target_date: str,
+                     max_pages: int = 3) -> List[Dict]:
+        """
+        搜索指定日期的雪球帖子
+
+        Args:
+            stock_code: 股票代码
+            target_date: 目标日期 YYYYMMDD
+            max_pages: 最大翻页数
+
+        Returns:
+            帖子列表（可能因 WAF 拦截而为空）
+        """
+        self._init_cookies()
+
+        try:
+            target_dt = datetime.strptime(target_date, "%Y%m%d")
+            target_date_str = target_dt.strftime("%Y-%m-%d")
+        except ValueError:
+            return []
+
+        all_posts = []
+        for page in range(1, max_pages + 1):
+            params = {
+                "count": 20,
+                "page": page,
+                "q": stock_code,
+                "sort": "time",
+                "comment": "0",
+                "_": int(time.time() * 1000),
+            }
+            try:
+                resp = self.session.get(
+                    self.SEARCH_URL, params=params, timeout=10
+                )
+                if resp.status_code != 200:
+                    logger.debug(f"雪球 API 返回 {resp.status_code} (page={page})")
+                    break
+
+                data = resp.json()
+                items = data.get("list", [])
+                if not items:
+                    break
+
+                for item in items:
+                    created_at = item.get("created_at", 0)
+                    if not created_at:
+                        continue
+                    post_dt = datetime.fromtimestamp(created_at / 1000)
+                    post_date_str = post_dt.strftime("%Y-%m-%d")
+
+                    if post_date_str > target_date_str:
+                        continue  # 还没到目标日期，继续翻页
+                    if post_date_str < target_date_str:
+                        # 已经超过目标日期，停止
+                        return all_posts
+
+                    all_posts.append({
+                        "title": (item.get("title") or "").strip()
+                                 or (item.get("text") or "")[:100].strip(),
+                        "url": f"https://xueqiu.com{item.get('target', '')}",
+                        "content": item.get("text", ""),
+                        "source_type": "forum",
+                        "source": "xueqiu",
+                        "reply_count": item.get("reply_count", 0),
+                        "read_count": item.get("view_count", 0),
+                        "post_time": post_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    })
+
+            except (requests.RequestException, ValueError, KeyError) as e:
+                logger.debug(f"雪球搜索失败 (page={page}): {e}")
+                break
+
+            time.sleep(0.8)  # 雪球限流较严
+
+        return all_posts
+
+
+class BackfillRunner:
+    """个股历史数据回填执行器"""
+
+    def __init__(self, config: Config, stock_code: str, months: int = 3,
+                 delay: float = 2.5):
+        self.config = config
+        self.stock_code = stock_code
+        self.months = months
+        self.delay = delay
+
+        stock_info = self._resolve_stock(stock_code)
+        self.stock_name = stock_info["name"]
+        self.market_cap = stock_info.get("market_cap", 100.0)
+
+        self.price_fetcher = HistoricalPriceFetcher()
+
+        from llm import DeepSeekLLMProvider
+        self.llm_provider = DeepSeekLLMProvider(
+            api_key=config.DEEPSEEK_API_KEY,
+            api_base=config.DEEPSEEK_API_BASE,
+            model=config.DEEPSEEK_MODEL,
+            timeout=config.LLM_TIMEOUT,
+            max_retries=config.LLM_MAX_RETRIES
+        )
+
+    def _resolve_stock(self, stock_code: str) -> dict:
+        """从配置中查找股票信息"""
+        for s in self.config.STOCK_LIST:
+            if s["code"] == stock_code:
+                return s
+        raise ValueError(
+            f"股票代码 {stock_code} 不在配置的 STOCK_LIST 中，"
+            f"请使用 --stock-name 参数手动指定名称"
+        )
+
+    def _check_already_backfilled(self, date_str: str) -> bool:
+        """检查某日期是否已有该股票的数据"""
+        date_dir = os.path.join(self.config.OUTPUT_DIR, date_str)
+        if not os.path.isdir(date_dir):
+            return False
+        target_name = f"{self.stock_name}({self.stock_code})"
+        for fname in os.listdir(date_dir):
+            if fname.endswith("数据.json"):
+                fpath = os.path.join(date_dir, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    for r in data.get("results", []):
+                        if r.get("target_name") == target_name:
+                            return True
+                except Exception:
+                    continue
+        return False
+
+    def _scrape_guba(self, date_str: str) -> List[Dict]:
+        """抓取股吧指定日期的帖子"""
+        try:
+            from guba_scraper import GubaScraper
+            scraper = GubaScraper()
+            posts = scraper.scrape_stock_posts(
+                self.stock_code,
+                max_pages=self.config.GUBA_MAX_PAGES,
+                target_date=date_str
+            )
+            for p in posts:
+                p.setdefault("source_type", "forum")
+                p.setdefault("source", "guba")
+                if "content" not in p or not p["content"]:
+                    p["content"] = p.get("title", "")
+            return posts
+        except Exception as e:
+            logger.warning(f"股吧抓取失败 ({date_str}): {e}")
+            return []
+
+    def _search_xueqiu(self, date_str: str) -> List[Dict]:
+        """直接爬取雪球指定日期的帖子（不走 Tavily）"""
+        scraper = XueqiuScraper()
+        posts = scraper.search_posts(
+            self.stock_code, date_str, max_pages=3
+        )
+        if posts:
+            logger.info(f"  雪球直接爬取: {len(posts)} 帖")
+        else:
+            logger.debug(f"  雪球无数据 ({date_str})，可能被 WAF 拦截或无当日讨论")
+        return posts
+
+    def _run_v3_emotion(self, posts: List[Dict]) -> Optional[Dict]:
+        """运行 V3 多维度情绪分析"""
+        if not posts:
+            logger.warning("无帖子数据，跳过 V3 情绪分析")
+            return None
+
+        try:
+            from emotion_v3 import analyze_emotion_v3, emotion_score_v3_to_dict
+            v3_result = analyze_emotion_v3(
+                posts=posts,
+                stock_name=self.stock_name,
+                stock_code=self.stock_code,
+                market_cap=self.market_cap,
+                llm_provider=self.llm_provider
+            )
+            if v3_result:
+                return emotion_score_v3_to_dict(v3_result)
+        except Exception as e:
+            logger.warning(f"V3 情绪分析失败: {e}")
+        return None
+
+    def _override_trading_with_kline(self, emotion_v3: Dict,
+                                      price_data: dict) -> None:
+        """用 K 线历史数据替换 real-time trading_metrics"""
+        if not emotion_v3 or not price_data:
+            return
+
+        tm = emotion_v3.get("trading_metrics", {})
+        pct = price_data.get("pct_change", 0.0) or 0.0
+
+        # 用 K 线数据覆盖
+        tm["current_price"] = price_data.get("close")
+        tm["price_change_pct"] = pct
+        tm["turnover_rate"] = price_data.get("turnover")
+        tm["fetch_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        tm["volume_ratio"] = None
+        tm["main_net_inflow"] = None
+        tm["bid_ask_ratio"] = None
+
+        # 基于涨跌幅重新计算 trading_score
+        if pct > 3:
+            tm["trading_score"] = 2.0
+            tm["trading_signal"] = "强势上涨"
+        elif pct > 1:
+            tm["trading_score"] = 1.0
+            tm["trading_signal"] = "温和上涨"
+        elif pct > -1:
+            tm["trading_score"] = 0.0
+            tm["trading_signal"] = "横盘"
+        elif pct > -3:
+            tm["trading_score"] = -1.0
+            tm["trading_signal"] = "温和下跌"
+        else:
+            tm["trading_score"] = -2.0
+            tm["trading_signal"] = "明显下跌"
+
+        # 重新计算 final_score
+        news_w = 0.2
+        forum_w = 0.5
+        trading_w = 0.3
+        news_score = emotion_v3.get("news_score", 0.0) or 0.0
+        forum_score = emotion_v3.get("forum_score", 0.0) or 0.0
+        trading_score = tm["trading_score"]
+        final_score = news_score * news_w + forum_score * forum_w + trading_score * trading_w
+        emotion_v3["final_score"] = round(max(-3.0, min(3.0, final_score)), 2)
+        emotion_v3["trading_score"] = trading_score
+
+    def _save_day_data(self, date_str: str, v3_dict: Optional[Dict],
+                        posts: List[Dict]) -> str:
+        """保存单日数据到 output/YYYYMMDD/ 目录"""
+        output_dir = self.config.get_output_dir_for_date(date_str)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        data_file = os.path.join(output_dir, f"{ts}-数据.json")
+
+        target_name = f"{self.stock_name}({self.stock_code})"
+        result = {
+            "target_type": "stock",
+            "target_name": target_name,
+            "news_list": posts,
+            "analysis": "",
+            "summary": "",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "is_no_update": False,
+            "failure_reason": "",
+            "emotion_score": v3_dict["final_score"] / 3.0 if v3_dict else 0.0,
+            "classified_posts": [],
+            "param_suggestion": "",
+            "use_v2_emotion": False,
+            "use_v3_emotion": v3_dict is not None,
+            "emotion_v3": v3_dict or {},
+        }
+
+        data = {
+            "date": date_str,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "results": [result],
+            "search_provider": "backfill",
+            "backfill": True,
+        }
+
+        os.makedirs(output_dir, exist_ok=True)
+        with open(data_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        return data_file
+
+    def run(self) -> dict:
+        """执行回填主流程"""
+        end_date = datetime.now().strftime("%Y%m%d")
+        beg_date = (datetime.now() - timedelta(days=self.months * 31)).strftime("%Y%m%d")
+
+        logger.info(f"开始回填: {self.stock_name}({self.stock_code}), "
+                     f"{self.months} 个月 ({beg_date} ~ {end_date})")
+
+        # 1. 获取交易日 + 历史股价
+        kline_data = self.price_fetcher.fetch_kline(
+            self.stock_code, beg_date, end_date
+        )
+        trading_days = kline_data["trading_days"]
+        prices = kline_data["prices"]
+
+        if not trading_days:
+            logger.error("未获取到任何交易日数据，回填终止")
+            return {"status": "failed", "reason": "no_trading_days"}
+
+        logger.info(f"共 {len(trading_days)} 个交易日待回填")
+
+        # 2. 遍历交易日
+        completed = 0
+        skipped = 0
+        failed = 0
+
+        for i, day in enumerate(trading_days):
+            # 跳过已回填的
+            if self._check_already_backfilled(day):
+                skipped += 1
+                continue
+
+            logger.info(f"[{i+1}/{len(trading_days)}] 回填 {day} ...")
+
+            try:
+                # 抓取股吧
+                guba_posts = self._scrape_guba(day)
+                # 搜索雪球
+                xueqiu_posts = self._search_xueqiu(day)
+                # 合并
+                all_posts = guba_posts + xueqiu_posts
+
+                if not all_posts:
+                    logger.info(f"  {day}: 无股吧/雪球数据，跳过")
+                    failed += 1
+                    continue
+
+                logger.info(f"  股吧 {len(guba_posts)} 帖, 雪球 {len(xueqiu_posts)} 帖")
+
+                # V3 情绪分析
+                v3_dict = self._run_v3_emotion(all_posts)
+
+                # 用 K 线历史价格覆盖 real-time trading
+                if v3_dict and day in prices:
+                    self._override_trading_with_kline(v3_dict, prices[day])
+
+                # 保存
+                saved_path = self._save_day_data(day, v3_dict, all_posts)
+                logger.info(f"  ✓ 已保存: {saved_path}")
+                completed += 1
+
+            except Exception as e:
+                logger.error(f"  ✗ {day} 回填失败: {e}")
+                failed += 1
+
+            # 节流
+            if i < len(trading_days) - 1:
+                time.sleep(self.delay)
+
+        summary = {
+            "status": "completed",
+            "stock_code": self.stock_code,
+            "stock_name": self.stock_name,
+            "trading_days": len(trading_days),
+            "completed": completed,
+            "skipped": skipped,
+            "failed": failed,
+        }
+        logger.info(f"回填完成: 完成 {completed}, 跳过 {skipped}, 失败 {failed}")
+        return summary
+
+
+def backfill_main(args) -> None:
+    """从 main.py 调用的入口函数"""
+    from logger import setup_logger
+
+    config = get_config()
+    setup_logger(
+        log_dir=os.path.join(config.OUTPUT_DIR, "logs"),
+        log_level=config.LOG_LEVEL
+    )
+
+    stock_code = args.backfill
+    months = getattr(args, "months", 3)
+
+    # 检查是否需要手动指定股票名
+    stock_info = None
+    for s in config.STOCK_LIST:
+        if s["code"] == stock_code:
+            stock_info = s
+            break
+
+    if stock_info is None:
+        stock_name = getattr(args, "stock_name", None)
+        if not stock_name:
+            print(f"错误: 股票代码 {stock_code} 不在配置列表中，"
+                  f"请使用 --stock-name 参数指定名称")
+            return
+        # 临时添加到配置
+        config.STOCK_LIST.append({
+            "code": stock_code,
+            "name": stock_name,
+            "market_cap": 100.0,
+        })
+
+    runner = BackfillRunner(config, stock_code, months=months)
+    summary = runner.run()
+
+    print(f"\n回填结果: {summary['stock_name']}({summary['stock_code']})")
+    print(f"  交易日总数: {summary['trading_days']}")
+    print(f"  成功回填:   {summary['completed']}")
+    print(f"  跳过(已存在): {summary['skipped']}")
+    print(f"  失败:       {summary['failed']}")
+    print(f"\n运行 dashboard 查看: python dashboard.py")

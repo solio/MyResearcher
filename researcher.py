@@ -234,6 +234,7 @@ class StockResearcher:
             time_range_days=time_range_days,
             enable_cleanup=config.ENABLE_CONTENT_CLEANUP,
             tavily_api_key=config.TAVILY_API_KEY,
+            tavily_api_keys=config.TAVILY_API_KEYS,
             tavily_time_range_days=config.TAVILY_SEARCH_TIME_RANGE_DAYS,
             search_engine_path=config.SEARCH_ENGINE_PATH,
             skill_use_targeted=config.SKILL_USE_TARGETED,

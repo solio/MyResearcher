@@ -29,11 +29,25 @@ class Config:
         self.DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
         self.DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
-        # 备用key1 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 
-        # 备用key2 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
-        # 备用key3 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
-        # 备用key4 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
-        self.TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "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")
+        # Tavily API Keys（支持多个key，432限流时自动切换）
+        # 可通过 TAVILY_API_KEYS 环境变量配置，逗号分隔
+        _default_keys = [
+            "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",
+            "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",
+            "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",
+            "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",
+        ]
+        _keys_env = os.getenv("TAVILY_API_KEYS", "")
+        if _keys_env:
+            self.TAVILY_API_KEYS = [k.strip() for k in _keys_env.split(",") if k.strip()]
+        else:
+            # 兼容单key配置
+            _single_key = os.getenv("TAVILY_API_KEY", "")
+            if _single_key:
+                self.TAVILY_API_KEYS = [_single_key] + _default_keys
+            else:
+                self.TAVILY_API_KEYS = _default_keys
+        self.TAVILY_API_KEY = self.TAVILY_API_KEYS[0]
 
         # ========== 定时任务配置 ==========
         self.CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "180"))

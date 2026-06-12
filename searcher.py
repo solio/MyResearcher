@@ -112,26 +112,62 @@ class BaseSearchProvider(ABC):
         pass
 
 
-class TavilySearchProvider(BaseSearchProvider):
-    """Tavily搜索提供者"""
+class TavilyRateLimitError(Exception):
+    """Tavily API 限流异常（HTTP 432）"""
+    pass
 
-    def __init__(self, api_key: str, timeout: int = 40, max_retries: int = 3,
+
+class TavilySearchProvider(BaseSearchProvider):
+    """Tavily搜索提供者（支持多API Key自动切换）"""
+
+    def __init__(self, api_key: str = None, api_keys: list = None,
+                 timeout: int = 40, max_retries: int = 3,
                  tavily_time_range_days: int = 2):
         """
         初始化
 
         Args:
-            api_key: Tavily API Key
+            api_key: Tavily API Key（单key模式，兼容旧代码）
+            api_keys: Tavily API Key列表（多key模式，432时自动切换）
             timeout: 超时时间（秒）
             max_retries: 最大重试次数
             tavily_time_range_days: Tavily搜索的时间范围（天数，默认2天）
         """
-        self.api_key = api_key
+        if api_keys:
+            self.api_keys = list(api_keys)
+        elif api_key:
+            self.api_keys = [api_key]
+        else:
+            self.api_keys = []
+        self._key_index = 0
         self.timeout = timeout
         self.max_retries = max_retries
         self.tavily_time_range_days = tavily_time_range_days
         self.base_url = "https://api.tavily.com/search"
         self.content_cleaner = ContentCleaner()
+
+    @property
+    def api_key(self):
+        """当前使用的API Key"""
+        if not self.api_keys:
+            return ""
+        return self.api_keys[self._key_index % len(self.api_keys)]
+
+    def rotate_key(self) -> bool:
+        """
+        切换到下一个API Key
+
+        Returns:
+            是否成功切换（False表示所有key已用完）
+        """
+        if len(self.api_keys) <= 1:
+            return False
+        self._key_index += 1
+        if self._key_index >= len(self.api_keys):
+            self._key_index = 0
+            return False  # 已轮完一圈
+        logger.warning(f"Tavily API Key 切换: 第 {self._key_index + 1}/{len(self.api_keys)} 个")
+        return True
 
     def _search_once(self, query: str, max_results: int,
                      search_depth: str = "basic",
@@ -179,6 +215,10 @@ class TavilySearchProvider(BaseSearchProvider):
             logger.debug(f"使用time_range: {time_range}")
 
         response = requests.post(self.base_url, json=payload, headers=headers, timeout=self.timeout)
+        if response.status_code == 432:
+            raise TavilyRateLimitError(
+                f"Tavily API 限流 (432)，当前使用第 {self._key_index + 1}/{len(self.api_keys)} 个 key"
+            )
         response.raise_for_status()
         return response.json()
 
@@ -216,8 +256,11 @@ class TavilySearchProvider(BaseSearchProvider):
 
             logger.info(f"搜索策略{idx+1}/{len(queries_to_try)}: {current_query[:40]}...")
 
-            # 执行搜索（带重试）
-            for attempt in range(1, self.max_retries + 1):
+            # 执行搜索（带重试和key自动切换）
+            attempt = 0
+            rotated_keys = set()  # 本轮已因432切换过的key index
+            while attempt < self.max_retries:
+                attempt += 1
                 try:
                     result = self._search_once(
                         current_query,
@@ -239,6 +282,24 @@ class TavilySearchProvider(BaseSearchProvider):
 
                     logger.info(f"本轮新增 {len(new_results)} 条，共 {len(all_results)} 条")
                     break
+
+                except TavilyRateLimitError as e:
+                    last_error = e
+                    logger.warning(f"Tavily 限流 (第{attempt}次): {e}")
+                    if self.rotate_key():
+                        # 检查是否已经切换到用过的key（说明所有key都限流了）
+                        if self._key_index in rotated_keys:
+                            logger.warning("所有 API Key 均已限流，等待后重试")
+                        else:
+                            rotated_keys.add(self._key_index)
+                            logger.info("已切换 API Key，立即重试...")
+                            attempt -= 1  # 不消耗重试次数
+                            continue
+                    # 回退 attempt 避免双重计数
+                    if attempt < self.max_retries:
+                        wait_time = 2 ** attempt
+                        logger.info(f"等待 {wait_time} 秒后重试...")
+                        time.sleep(wait_time)
 
                 except requests.exceptions.RequestException as e:
                     last_error = e
@@ -441,6 +502,7 @@ class StockSearcher:
                  time_range_days: int = None, enable_cleanup: bool = True,
                  search_provider_type: str = "skill",
                  tavily_api_key: str = "",
+                 tavily_api_keys: list = None,
                  tavily_time_range_days: int = 2,
                  search_engine_path: str = "../search-engine",
                  skill_use_targeted: bool = False,
@@ -456,7 +518,8 @@ class StockSearcher:
             time_range_days: 搜索时间范围（天数）
             enable_cleanup: 是否清理模板内容
             search_provider_type: 搜索提供者类型 "skill" 或 "tavily"
-            tavily_api_key: Tavily API Key（tavily模式需要）
+            tavily_api_key: Tavily API Key（兼容旧代码）
+            tavily_api_keys: Tavily API Key列表（432时自动切换）
             tavily_time_range_days: Tavily搜索的时间范围（天数，默认2天）
             search_engine_path: search-engine目录路径（skill模式需要）
             skill_use_targeted: skill是否使用定向搜索
@@ -470,6 +533,7 @@ class StockSearcher:
         elif search_provider_type == "tavily":
             self.provider = TavilySearchProvider(
                 api_key=tavily_api_key,
+                api_keys=tavily_api_keys,
                 tavily_time_range_days=tavily_time_range_days
             )
         else:
