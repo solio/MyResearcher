@@ -674,8 +674,8 @@ class StockSearcher:
             search_results = search_results[:tavily_news_max]
         all_news.extend(search_results)
 
-        # 股吧爬虫结果不足时，补充搜索雪球论坛
-        if self.enable_forum and len(guba_results) < 30:
+        # 始终搜索雪球论坛（与股吧互补，信息源不同）
+        if self.enable_forum:
             forum_queries = [
                 f"site:xueqiu.com {stock_name} {stock_code} 分析",
                 f"site:xueqiu.com {stock_name} {stock_code} 讨论",
