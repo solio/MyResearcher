@@ -40,8 +40,14 @@ class Config:
         ]
         _keys_env = os.getenv("TAVILY_API_KEYS", "")
         if _keys_env:
-            self.TAVILY_API_KEYS = [k.strip() for k in _keys_env.split(",") if k.strip()]
-        else:
+            raw_keys = [k.strip() for k in _keys_env.split(",") if k.strip()]
+            # 过滤明显无效的 key（含非 ASCII 字符或占位符）
+            self.TAVILY_API_KEYS = [k for k in raw_keys if k.isascii() and not k.startswith("你的")]
+            if self.TAVILY_API_KEYS and len(self.TAVILY_API_KEYS) < len(raw_keys):
+                from logger import get_logger
+                logger = get_logger()
+                logger.warning(f"已过滤 {len(raw_keys) - len(self.TAVILY_API_KEYS)} 个无效 API Key（含非ASCII字符）")
+        if not getattr(self, 'TAVILY_API_KEYS', None):
             # 兼容单key配置
             _single_key = os.getenv("TAVILY_API_KEY", "")
             if _single_key:
