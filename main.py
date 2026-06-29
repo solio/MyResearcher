@@ -237,35 +237,33 @@ def supplement_news(data_file: str):
         except Exception as e:
             logger.error(f"  补充 {target_name} 失败: {e}")
 
-    # 保存更新后的数据
-    data["search_provider"] = "tavily"
+    # 覆盖原数据JSON（原地补充）
     data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    data["results"] = results_data
-
-    # 新文件名
-    now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = config.get_output_dir_for_date(date_str or datetime.now().strftime("%Y%m%d"))
-
-    # 保存数据JSON
-    new_data_file = os.path.join(output_dir, f"{now_str}-数据-补充.json")
-    with open(new_data_file, "w", encoding="utf-8") as f:
+    with open(data_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-    # 重新生成纪要（直接从dict生成，避免重建复杂对象）
-    md_now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    new_md_file = os.path.join(output_dir, f"{md_now_str}-纪要-补充.md")
-    md = _generate_markdown_from_dict(results_data, md_now_str)
-    with open(new_md_file, "w", encoding="utf-8") as f:
-        f.write(md)
+    # 覆盖原纪要MD
+    md_path = str(data_path).replace("-数据.json", "-纪要.md").replace("-数据-补充.json", "-纪要.md")
+    if os.path.exists(md_path):
+        md = _generate_markdown_from_dict(results_data, data.get("timestamp", ""))
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(md)
+        logger.info(f"  纪要已更新: {md_path}")
+    else:
+        # 原纪要不存在（可能是searchOnly产物），新生成
+        md_path = str(data_path).replace("-数据.json", "-纪要.md")
+        md = _generate_markdown_from_dict(results_data, data.get("timestamp", ""))
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(md)
+        logger.info(f"  纪要已创建: {md_path}")
 
     logger.info(f"补充完成: {updated_count} 个标的")
-    logger.info(f"  数据: {new_data_file}")
-    logger.info(f"  纪要: {new_md_file}")
+    logger.info(f"  数据已更新: {data_path}")
 
 
 def _generate_markdown_from_dict(results_data: list, timestamp: str) -> str:
     """直接从dict生成Markdown纪要（避免重建复杂对象）"""
-    md = f"# 个股价值投研纪要（新闻补充）\n\n生成时间: {timestamp}\n\n---\n\n"
+    md = f"# 个股价值投研纪要\n\n生成时间: {timestamp}\n\n---\n\n"
     for r in results_data:
         target_type = r.get("target_type", "stock")
         target_name = r.get("target_name", "")
