@@ -139,44 +139,47 @@ def supplement_news(data_file: str):
             logger.info(f"  跳过 {target_name}（已有 {news_count} 条新闻）")
             continue
 
-        logger.info(f">>> 补充新闻: {target_name}")
+        logger.info(f">>> 补充: {target_name} (缺新闻={news_count==0}, 缺雪球={xueqiu_count==0 and r['target_type']=='stock'})")
 
         try:
             all_new_items = []
+            need_news = (news_count == 0)
+            need_xueqiu = (xueqiu_count == 0 and r["target_type"] == "stock" and config.ENABLE_FORUM_SEARCH)
 
-            # ========== 1. 搜索 Tavily 新闻 ==========
-            if r["target_type"] == "stock":
-                news_queries = [
-                    f"{stock_name} {stock_code} 最新新闻",
-                    f"{stock_name} 股票分析 研报",
-                    f"{stock_name} 最新消息 公告",
-                    f"{stock_name} 财报 业绩 营收",
-                    f"{stock_name} {stock_code} 券商研报",
-                ]
-            else:
-                news_queries = [
-                    f"{r['target_name']} 最新动态",
-                    f"{r['target_name']} 行业分析",
-                    f"{r['target_name']} 发展趋势",
-                ]
+            # ========== 1. 搜索 Tavily 新闻（仅缺失时） ==========
+            if need_news:
+                if r["target_type"] == "stock":
+                    news_queries = [
+                        f"{stock_name} {stock_code} 最新新闻",
+                        f"{stock_name} 股票分析 研报",
+                        f"{stock_name} 最新消息 公告",
+                        f"{stock_name} 财报 业绩 营收",
+                        f"{stock_name} {stock_code} 券商研报",
+                    ]
+                else:
+                    news_queries = [
+                        f"{r['target_name']} 最新动态",
+                        f"{r['target_name']} 行业分析",
+                        f"{r['target_name']} 发展趋势",
+                    ]
 
-            for q in news_queries:
-                try:
-                    results = provider.search(q, max_results=8,
-                                              time_range_days=config.TAVILY_SEARCH_TIME_RANGE_DAYS,
-                                              enable_cleanup=True)
-                    for item in results:
-                        if not deduplicator.is_duplicate(item):
-                            deduplicator.add(item)
-                            item["source_type"] = "news"
-                            all_new_items.append(item)
-                except Exception as e:
-                    logger.warning(f"  新闻搜索失败: {q[:30]}... {e}")
+                for q in news_queries:
+                    try:
+                        results = provider.search(q, max_results=8,
+                                                  time_range_days=config.TAVILY_SEARCH_TIME_RANGE_DAYS,
+                                                  enable_cleanup=True)
+                        for item in results:
+                            if not deduplicator.is_duplicate(item):
+                                deduplicator.add(item)
+                                item["source_type"] = "news"
+                                all_new_items.append(item)
+                    except Exception as e:
+                        logger.warning(f"  新闻搜索失败: {q[:30]}... {e}")
 
-            logger.info(f"  Tavily新闻: {len([x for x in all_new_items if x.get('source_type')=='news'])} 条")
+                logger.info(f"  Tavily新闻: {len([x for x in all_new_items if x.get('source_type')=='news'])} 条")
 
-            # ========== 2. 搜索雪球论坛 ==========
-            if r["target_type"] == "stock" and config.ENABLE_FORUM_SEARCH:
+            # ========== 2. 搜索雪球论坛（仅缺失时） ==========
+            if need_xueqiu:
                 xueqiu_queries = [
                     f"site:xueqiu.com {stock_name} {stock_code} 分析",
                     f"site:xueqiu.com {stock_name} {stock_code} 讨论",
