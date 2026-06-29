@@ -112,6 +112,7 @@ class Config:
         self.GUBA_MAX_PAGES = int(os.getenv("GUBA_MAX_PAGES", "10"))  # 股吧最大爬取页数
         self.GUBA_MAX_RESULTS = int(os.getenv("GUBA_MAX_RESULTS", "80"))  # 股吧最大帖子数量
         self.GUBA_ONLY_24H = os.getenv("GUBA_ONLY_24H", "true").lower() == "true"  # 仅24小时内帖子
+        self.GUBA_USE_CURL_CFFI = os.getenv("GUBA_USE_CURL_CFFI", "false").lower() == "true"  # 使用curl_cffi模拟浏览器TLS指纹
 
         # ========== 输出配置 ==========
         self.OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./output")

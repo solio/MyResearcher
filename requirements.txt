@@ -2,3 +2,4 @@ python-dotenv>=1.0
 python-json-logger>=3.0
 requests>=2.32
 schedule>=1.2
+curl_cffi>=0.7

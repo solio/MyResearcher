@@ -3,7 +3,6 @@
 股吧爬虫模块
 直接爬取guba.eastmoney.com获取帖子
 """
-import requests
 import time
 import re
 import random
@@ -22,6 +21,17 @@ except ImportError:
     BS4_AVAILABLE = False
     logger.warning("BeautifulSoup未安装，将使用简化解析")
 
+# curl_cffi: 模拟浏览器 TLS 指纹，绕过反爬
+try:
+    from curl_cffi import requests as curl_cffi_requests
+    CURL_CFFI_AVAILABLE = True
+except ImportError:
+    curl_cffi_requests = None
+    CURL_CFFI_AVAILABLE = False
+
+import requests  # 标准 requests 作为回退
+
+
 class GubaScraper:
     """股吧爬虫"""
 
@@ -32,16 +42,26 @@ class GubaScraper:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
     ]
 
-    def __init__(self):
+    def __init__(self, use_curl_cffi: bool = True):
         self.headers = {
             "User-Agent": self.USER_AGENTS[0],
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Referer": "https://guba.eastmoney.com/"
         }
-        self.session = requests.Session()
-        self.session.headers.update(self.headers)
         self._ua_index = 0
+
+        if use_curl_cffi and CURL_CFFI_AVAILABLE:
+            self.session = curl_cffi_requests.Session()
+            # 模拟 Chrome 120 的 TLS 指纹
+            self.session.impersonate = "chrome120"
+            logger.info("股吧爬虫使用 curl_cffi (TLS 指纹模拟 chrome120)")
+        else:
+            if use_curl_cffi and not CURL_CFFI_AVAILABLE:
+                logger.warning("curl_cffi 未安装，回退到标准 requests")
+            self.session = requests.Session()
+
+        self.session.headers.update(self.headers)
 
     def _rotate_ua(self):
         self._ua_index = (self._ua_index + 1) % len(self.USER_AGENTS)
@@ -128,9 +148,10 @@ class GubaScraper:
                 logger.info("检测到编码异常，尝试备用解码方案")
                 html = response.content.decode('utf-8', errors='replace')
 
-            # 检查反爬
-            if "验证" in html or "验证码" in html:
-                logger.warning("检测到反爬机制，需要验证码")
+            # 检查反爬：真正的验证码页面不会有正常帖子链接
+            post_links = re.findall(rf'/news,{stock_code},\d+\.html', html)
+            if len(post_links) < 3 and ("验证码" in html or "人机验证" in html or "geetest" in html.lower()):
+                logger.warning(f"检测到反爬机制，需要验证码（帖子链接数: {len(post_links)}）")
                 return None
 
             return html

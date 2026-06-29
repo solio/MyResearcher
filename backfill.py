@@ -269,7 +269,7 @@ class BackfillRunner:
         """抓取股吧指定日期的帖子（逐天接口，保留兼容）"""
         try:
             from guba_scraper import GubaScraper
-            scraper = GubaScraper()
+            scraper = GubaScraper(use_curl_cffi=getattr(self.config, 'GUBA_USE_CURL_CFFI', True))
             posts = scraper.scrape_stock_posts(
                 self.stock_code,
                 max_pages=self.config.GUBA_MAX_PAGES,
@@ -321,7 +321,7 @@ class BackfillRunner:
 
         try:
             from guba_scraper import GubaScraper
-            scraper = GubaScraper()
+            scraper = GubaScraper(use_curl_cffi=getattr(self.config, 'GUBA_USE_CURL_CFFI', True))
         except Exception as e:
             logger.warning(f"股吧爬虫初始化失败: {e}")
             return date_posts

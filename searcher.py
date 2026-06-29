@@ -558,7 +558,8 @@ class StockSearcher:
         self.guba_scraper = None
         if GUBA_AVAILABLE and config and hasattr(config, 'GUBA_SCRAPER_ENABLED') and config.GUBA_SCRAPER_ENABLED:
             try:
-                self.guba_scraper = GubaScraper()
+                use_curl = getattr(config, 'GUBA_USE_CURL_CFFI', True)
+                self.guba_scraper = GubaScraper(use_curl_cffi=use_curl)
                 logger.info("股吧爬虫已初始化")
             except Exception as e:
                 logger.warning(f"股吧爬虫初始化失败: {e}")
