@@ -178,28 +178,22 @@ def supplement_news(data_file: str):
 
                 logger.info(f"  Tavily新闻: {len([x for x in all_new_items if x.get('source_type')=='news'])} 条")
 
-            # ========== 2. 搜索雪球论坛（仅缺失时） ==========
+            # ========== 2. 搜索雪球论坛（直连爬虫，不消耗 Tavily 额度） ==========
             if need_xueqiu:
-                xueqiu_queries = [
-                    f"site:xueqiu.com {stock_name} {stock_code} 分析",
-                    f"site:xueqiu.com {stock_name} {stock_code} 讨论",
-                    f"{stock_name} 雪球 分析",
-                ]
-                for q in xueqiu_queries:
-                    try:
-                        results = provider.search(q, max_results=4,
-                                                  time_range_days=config.TAVILY_SEARCH_TIME_RANGE_DAYS,
-                                                  enable_cleanup=True)
-                        for item in results:
-                            if not deduplicator.is_duplicate(item):
-                                deduplicator.add(item)
-                                item["source_type"] = "forum"
-                                item["source"] = "xueqiu"
-                                all_new_items.append(item)
-                    except Exception as e:
-                        logger.warning(f"  雪球搜索失败: {q[:30]}... {e}")
-
-                logger.info(f"  雪球: {len([x for x in all_new_items if x.get('source')=='xueqiu'])} 条")
+                try:
+                    from xueqiu_scraper import XueqiuScraper
+                    xq = XueqiuScraper()
+                    xueqiu_results = xq.search_recent_posts(
+                        stock_code, max_results=30,
+                        time_range_days=config.TAVILY_SEARCH_TIME_RANGE_DAYS
+                    )
+                    for item in xueqiu_results:
+                        if not deduplicator.is_duplicate(item):
+                            deduplicator.add(item)
+                            all_new_items.append(item)
+                    logger.info(f"  雪球直连: {len(xueqiu_results)} 帖")
+                except Exception as e:
+                    logger.warning(f"  雪球直连失败: {e}")
 
             # ========== 3. 合并数据 ==========
             if all_new_items:

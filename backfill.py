@@ -100,107 +100,8 @@ class HistoricalPriceFetcher:
         return {"trading_days": trading_days, "prices": prices}
 
 
-class XueqiuScraper:
-    """雪球论坛直接爬取器（不依赖 Tavily）
-
-    注意：雪球主站有 WAF 保护 + 登录校验，直接 API 调用可能被拦截。
-    回填以股吧数据为主要来源，雪球作为尽力而为的补充。
-    """
-
-    SEARCH_URL = "https://xueqiu.com/statuses/search.json"
-
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://xueqiu.com/",
-        })
-
-    def _init_cookies(self):
-        """访问首页获取基础 cookie"""
-        try:
-            self.session.get("https://xueqiu.com/", timeout=10)
-        except Exception:
-            pass
-
-    def search_posts(self, stock_code: str, target_date: str,
-                     max_pages: int = 3) -> List[Dict]:
-        """
-        搜索指定日期的雪球帖子
-
-        Args:
-            stock_code: 股票代码
-            target_date: 目标日期 YYYYMMDD
-            max_pages: 最大翻页数
-
-        Returns:
-            帖子列表（可能因 WAF 拦截而为空）
-        """
-        self._init_cookies()
-
-        try:
-            target_dt = datetime.strptime(target_date, "%Y%m%d")
-            target_date_str = target_dt.strftime("%Y-%m-%d")
-        except ValueError:
-            return []
-
-        all_posts = []
-        for page in range(1, max_pages + 1):
-            params = {
-                "count": 20,
-                "page": page,
-                "q": stock_code,
-                "sort": "time",
-                "comment": "0",
-                "_": int(time.time() * 1000),
-            }
-            try:
-                resp = self.session.get(
-                    self.SEARCH_URL, params=params, timeout=10
-                )
-                if resp.status_code != 200:
-                    logger.debug(f"雪球 API 返回 {resp.status_code} (page={page})")
-                    break
-
-                data = resp.json()
-                items = data.get("list", [])
-                if not items:
-                    break
-
-                for item in items:
-                    created_at = item.get("created_at", 0)
-                    if not created_at:
-                        continue
-                    post_dt = datetime.fromtimestamp(created_at / 1000)
-                    post_date_str = post_dt.strftime("%Y-%m-%d")
-
-                    if post_date_str > target_date_str:
-                        continue  # 还没到目标日期，继续翻页
-                    if post_date_str < target_date_str:
-                        # 已经超过目标日期，停止
-                        return all_posts
-
-                    all_posts.append({
-                        "title": (item.get("title") or "").strip()
-                                 or (item.get("text") or "")[:100].strip(),
-                        "url": f"https://xueqiu.com{item.get('target', '')}",
-                        "content": item.get("text", ""),
-                        "source_type": "forum",
-                        "source": "xueqiu",
-                        "reply_count": item.get("reply_count", 0),
-                        "read_count": item.get("view_count", 0),
-                        "post_time": post_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                    })
-
-            except (requests.RequestException, ValueError, KeyError) as e:
-                logger.debug(f"雪球搜索失败 (page={page}): {e}")
-                break
-
-            time.sleep(0.8)  # 雪球限流较严
-
-        return all_posts
+# XueqiuScraper 已移至 xueqiu_scraper.py，此处导入复用
+from xueqiu_scraper import XueqiuScraper  # noqa: E402
 
 
 class BackfillRunner:
@@ -413,7 +314,7 @@ class BackfillRunner:
     def _search_xueqiu(self, date_str: str) -> List[Dict]:
         """直接爬取雪球指定日期的帖子（不走 Tavily）"""
         scraper = XueqiuScraper()
-        posts = scraper.search_posts(
+        posts = scraper.search_posts_by_date(
             self.stock_code, date_str, max_pages=3
         )
         if posts:

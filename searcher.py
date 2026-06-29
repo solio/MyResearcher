@@ -25,6 +25,13 @@ try:
 except ImportError:
     GUBA_AVAILABLE = False
 
+# 尝试导入雪球爬虫
+try:
+    from xueqiu_scraper import XueqiuScraper
+    XUEQIU_AVAILABLE = True
+except ImportError:
+    XUEQIU_AVAILABLE = False
+
 
 class NewsDeduplicator:
     """新闻去重器"""
@@ -564,6 +571,16 @@ class StockSearcher:
             except Exception as e:
                 logger.warning(f"股吧爬虫初始化失败: {e}")
 
+        # 初始化雪球爬虫
+        self.xueqiu_scraper = None
+        if XUEQIU_AVAILABLE and config and hasattr(config, 'GUBA_SCRAPER_ENABLED') and config.GUBA_SCRAPER_ENABLED:
+            try:
+                use_curl = getattr(config, 'XUEQIU_USE_CURL_CFFI', False)
+                self.xueqiu_scraper = XueqiuScraper(use_curl_cffi=use_curl)
+                logger.info("雪球爬虫已初始化")
+            except Exception as e:
+                logger.warning(f"雪球爬虫初始化失败: {e}")
+
     def _build_date_keywords(self, target_date: str) -> str:
         """根据目标日期构建搜索关键词片段"""
         try:
@@ -674,16 +691,25 @@ class StockSearcher:
             search_results = search_results[:tavily_news_max]
         all_news.extend(search_results)
 
-        # 始终搜索雪球论坛（与股吧互补，信息源不同）
-        if self.enable_forum:
+        # 始终搜索雪球论坛（直连爬虫，不消耗 Tavily 额度）
+        if self.enable_forum and self.xueqiu_scraper:
+            try:
+                time_range = getattr(self.config, 'TAVILY_SEARCH_TIME_RANGE_DAYS', 7) if self.config else 7
+                xueqiu_results = self.xueqiu_scraper.search_recent_posts(
+                    stock_code, max_results=30,
+                    time_range_days=time_range
+                )
+                all_news.extend(xueqiu_results)
+                logger.info(f"雪球直连: {len(xueqiu_results)} 帖")
+            except Exception as e:
+                logger.warning(f"雪球爬虫失败: {e}")
+        elif self.enable_forum:
+            # 回退：雪球爬虫不可用时走 Tavily
             forum_queries = [
                 f"site:xueqiu.com {stock_name} {stock_code} 分析",
                 f"site:xueqiu.com {stock_name} {stock_code} 讨论",
                 f"{stock_name} 雪球 分析",
-                f"{stock_name} 股民 分析",
             ]
-
-            # 指定日期时，添加带日期关键词的雪球搜索
             if self._date_keywords:
                 forum_queries.extend([
                     f"site:xueqiu.com {stock_name} {self._date_keywords}",
