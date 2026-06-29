@@ -385,7 +385,8 @@ class GubaScraper:
             return None
 
     def scrape_stock_posts(self, stock_code: str, max_pages: int = 10,
-                           target_date: str = None) -> List[Dict]:
+                           target_date: str = None,
+                           only_24h: bool = False) -> List[Dict]:
         """
         爬取某只股票的股吧帖子
 
@@ -394,6 +395,7 @@ class GubaScraper:
             max_pages: 最大爬取页数
             target_date: 目标日期，格式YYYYMMDD。指定时仅返回该日期及之前的帖子，
                          自动增加翻页数直到找到目标日期的内容。
+            only_24h: 仅保留24小时内的帖子（target_date 为 None 时生效）
 
         Returns:
             帖子列表
@@ -401,17 +403,19 @@ class GubaScraper:
         all_posts = []
         seen_urls = set()
         target_dt = None
+        cutoff_24h = None
 
         if target_date:
             target_dt = datetime.strptime(target_date, "%Y%m%d")
-            # 目标日期越久远，需要的翻页数越多（每页约20-30条帖子）
             days_ago = (datetime.now() - target_dt).days
             if days_ago > 0:
                 scaled_pages = max_pages + days_ago * 3
-                max_pages = min(scaled_pages, 200)  # 最多200页，允许回溯更久
+                max_pages = min(scaled_pages, 200)
                 logger.info(f"指定日期 {target_date}（{days_ago}天前），翻页数调整为 {max_pages}")
-
             target_date_str = target_dt.strftime("%Y-%m-%d")
+        elif only_24h:
+            cutoff_24h = datetime.now() - timedelta(hours=24)
+            logger.info(f"仅保留24小时内帖子（{cutoff_24h.strftime('%Y-%m-%d %H:%M')} 之后）")
 
         found_target_date = False  # 是否已找到目标日期的帖子
         gone_past_target = False   # 是否已翻过目标日期（帖子早于目标日期）
@@ -453,6 +457,21 @@ class GubaScraper:
                 seen_urls.add(url)
 
                 post_time_str = post.get("post_time")
+                post_dt = None
+                if post_time_str:
+                    try:
+                        post_dt = datetime.strptime(post_time_str, "%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        pass
+
+                # 24小时过滤
+                if cutoff_24h and post_dt:
+                    if post_dt < cutoff_24h:
+                        # 跟踪最老的帖子时间
+                        if page_oldest_time is None or post_dt < page_oldest_time:
+                            page_oldest_time = post_dt
+                        continue  # 跳过超过24小时的帖子
+
                 if post_time_str and target_dt:
                     try:
                         post_dt = datetime.strptime(post_time_str, "%Y-%m-%d %H:%M:%S")
@@ -510,8 +529,13 @@ class GubaScraper:
                         logger.info(f"已找到目标日期且已翻过，停止爬取")
                         break
             else:
+                # 24小时模式：本页最老帖子已超过24小时，且新增不足一页时停止
+                if cutoff_24h and page_oldest_time and page_oldest_time < cutoff_24h:
+                    if new_count < 20:  # 大部分帖子已过24h，终止
+                        logger.info(f"已翻过24小时窗口（最老帖: {page_oldest_time.strftime('%m-%d %H:%M')}），停止")
+                        break
                 # 无目标日期时：新帖子太少就停
-                if new_count < 3 and page > 3:
+                elif new_count < 3 and page > 3:
                     logger.info("新帖子太少，提前终止爬取")
                     break
 

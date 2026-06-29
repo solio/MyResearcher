@@ -640,9 +640,11 @@ class StockSearcher:
             try:
                 logger.info(f"使用股吧爬虫搜索: {stock_name}({stock_code})")
                 guba_max_pages = getattr(self.config, 'GUBA_MAX_PAGES', 10) if self.config else 10
+                guba_only_24h = getattr(self.config, 'GUBA_ONLY_24H', True) if self.config else True
                 guba_results = self.guba_scraper.scrape_stock_posts(
                     stock_code, max_pages=guba_max_pages,
-                    target_date=self.target_date
+                    target_date=self.target_date,
+                    only_24h=(guba_only_24h and not self.target_date)
                 )
 
                 # 股吧帖子
