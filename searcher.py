@@ -627,7 +627,7 @@ class StockSearcher:
                     target_date=self.target_date
                 )
 
-                # 股吧帖子已经是forum类型
+                # 股吧帖子
                 for r in guba_results:
                     if "source_type" not in r:
                         r["source_type"] = "forum"
@@ -641,56 +641,57 @@ class StockSearcher:
                 logger.warning(f"股吧爬虫失败，回退到搜索引擎方式: {e}")
                 self.guba_scraper = None  # 禁用，下次不再尝试
 
-        # 如果股吧结果不够或没启用，继续用搜索引擎搜索新闻
-        if len(all_news) < 20 or not self.guba_scraper:
-            # 更多query组合搜索新闻 - 增加更多新闻性查询，减少行情页
-            news_queries = [
-                f"{stock_name} {stock_code} 最新新闻",
-                f"{stock_name} 股票分析 研报",
-                f"{stock_name} 最新消息 公告",
-                f"{stock_name} 股市 动态",
-                f"{stock_name} 行业 资讯",
-                f"{stock_name} 公告 新闻",
-                f"{stock_name} 2025 2026 新闻",
-                f"{stock_name} 财报 业绩 营收",
-                f"{stock_name} 新闻 site:10jqka.com.cn",
-                f"{stock_name} 新闻 site:eastmoney.com",
-                # 新增：专门针对券商研报的搜索
-                f"{stock_name} {stock_code} 券商研报",
-                f"{stock_name} {stock_code} 研报 site:finance.sina.com.cn",
-                f"{stock_name} {stock_code} 研报 site:stock.finance.sina.com.cn",
+        # 始终搜索新闻文章（独立于股吧爬虫结果）
+        news_queries = [
+            f"{stock_name} {stock_code} 最新新闻",
+            f"{stock_name} 股票分析 研报",
+            f"{stock_name} 最新消息 公告",
+            f"{stock_name} 股市 动态",
+            f"{stock_name} 行业 资讯",
+            f"{stock_name} 公告 新闻",
+            f"{stock_name} 2025 2026 新闻",
+            f"{stock_name} 财报 业绩 营收",
+            f"{stock_name} 新闻 site:10jqka.com.cn",
+            f"{stock_name} 新闻 site:eastmoney.com",
+            # 新增：专门针对券商研报的搜索
+            f"{stock_name} {stock_code} 券商研报",
+            f"{stock_name} {stock_code} 研报 site:finance.sina.com.cn",
+            f"{stock_name} {stock_code} 研报 site:stock.finance.sina.com.cn",
+        ]
+
+        # 指定日期时，添加带日期关键词的搜索query
+        if self._date_keywords:
+            news_queries.extend([
+                f"{stock_name} {self._date_keywords} 新闻",
+                f"{stock_name} {self._date_keywords} 公告",
+            ])
+
+        search_results = self._multi_query_search(news_queries, max_results_per_query=8)
+        # Tavily 无法精确按日期过滤，限制数量避免旧闻污染当日数据
+        tavily_news_max = getattr(self.config, 'TAVILY_NEWS_MAX_RESULTS', 30) if self.config else 30
+        if len(search_results) > tavily_news_max:
+            search_results = search_results[:tavily_news_max]
+        all_news.extend(search_results)
+
+        # 股吧爬虫结果不足时，补充搜索雪球论坛
+        if self.enable_forum and len(guba_results) < 30:
+            forum_queries = [
+                f"site:xueqiu.com {stock_name} {stock_code} 分析",
+                f"site:xueqiu.com {stock_name} {stock_code} 讨论",
+                f"{stock_name} 雪球 分析",
+                f"{stock_name} 股民 分析",
             ]
 
-            # 指定日期时，添加带日期关键词的搜索query
+            # 指定日期时，添加带日期关键词的雪球搜索
             if self._date_keywords:
-                news_queries.extend([
-                    f"{stock_name} {self._date_keywords} 新闻",
-                    f"{stock_name} {self._date_keywords} 公告",
+                forum_queries.extend([
+                    f"site:xueqiu.com {stock_name} {self._date_keywords}",
+                    f"{stock_name} 雪球 {self._date_keywords}",
                 ])
-
-            search_results = self._multi_query_search(news_queries, max_results_per_query=8)
-            all_news.extend(search_results)
-
-            # 更多query组合搜索论坛 - 更具体的帖子查询，避免列表页
-            # （如果已经用了股吧爬虫，这里可以少搜一些）
-            if self.enable_forum and len(guba_results) < 30:
-                forum_queries = [
-                    f"site:xueqiu.com {stock_name} {stock_code} 分析",
-                    f"site:xueqiu.com {stock_name} {stock_code} 讨论",
-                    f"{stock_name} 雪球 分析",
-                    f"{stock_name} 股民 分析",
-                ]
-
-                # 指定日期时，添加带日期关键词的雪球搜索
-                if self._date_keywords:
-                    forum_queries.extend([
-                        f"site:xueqiu.com {stock_name} {self._date_keywords}",
-                        f"{stock_name} 雪球 {self._date_keywords}",
-                    ])
-                forum_results = self._multi_query_search(forum_queries, max_results_per_query=4)
-                for r in forum_results:
-                    r["source_type"] = "forum"
-                    all_news.append(r)
+            forum_results = self._multi_query_search(forum_queries, max_results_per_query=4)
+            for r in forum_results:
+                r["source_type"] = "forum"
+                all_news.append(r)
 
         # 标记新闻来源
         for r in all_news:
@@ -700,11 +701,6 @@ class StockSearcher:
         # 最后整体去重
         final_deduplicator = NewsDeduplicator()
         all_news = final_deduplicator.deduplicate(all_news)
-
-        # 限制最大数量（配置）
-        guba_max_results = getattr(self.config, 'GUBA_MAX_RESULTS', 100) if self.config else 100
-        if len(all_news) > guba_max_results:
-            all_news = all_news[:guba_max_results]
 
         # 记录过滤前后的数据量
         logger.info(f"{stock_name}({stock_code}) 最终有效新闻数: {len(all_news)}")
@@ -755,7 +751,11 @@ class StockSearcher:
                 f"{industry_name} {self._date_keywords} 行业",
             ])
 
-        all_news = self._multi_query_search(news_queries, max_results_per_query=8)  # 增加单query结果量
+        all_news = self._multi_query_search(news_queries, max_results_per_query=8)
+        # Tavily 无法精确按日期过滤，限制数量避免旧闻污染当日数据
+        tavily_news_max = getattr(self.config, 'TAVILY_NEWS_MAX_RESULTS', 30) if self.config else 30
+        if len(all_news) > tavily_news_max:
+            all_news = all_news[:tavily_news_max]
 
         # 搜索论坛讨论
         if self.enable_forum:

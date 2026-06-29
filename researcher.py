@@ -317,24 +317,8 @@ class StockResearcher:
 
                 # 分离出需要分析的帖子
                 emotion_posts = [p for p in result.classified_posts if p.post_type]
-                emotion_map = {}
 
-                if emotion_posts:
-                    # 批量分析情绪（节省token）
-                    logger.info(f"批量分析 {len(emotion_posts)} 个帖子的情绪")
-                    emotion_map = self.analyzer.analyze_batch_post_emotions(emotion_posts)
-
-                    # 回填情绪值
-                    for i, post in enumerate(emotion_posts):
-                        post.emotion_score = emotion_map.get(i, 0.0)
-
-                tracer.record_emotion_map(emotion_map if emotion_posts else {})
-
-                # 计算综合情绪值
-                result.emotion_score = self.emotion_analyzer.calculate_emotion_score(result.classified_posts, stock)
-                tracer.record_v1_score(result.emotion_score)
-
-                # 记录每日统计
+                # 记录每日统计（用于参数自动调优）
                 self.emotion_analyzer.record_stock_daily_stats(stock["code"], result.classified_posts, self.today_str)
 
                 # 检查参数更新
@@ -422,7 +406,7 @@ class StockResearcher:
                                   f"({result.emotion_v2.final_score:.3f})")
                         logger.info("=" * 60)
                     else:
-                        logger.warning("V2 情绪分析也失败，继续使用V1版本")
+                        logger.warning("V2 情绪分析失败，跳过")
                         result.use_v2_emotion = False
 
                 # 5. LLM深度分析（带情绪值）

@@ -36,6 +36,7 @@ class Config:
             "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",
             "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",
             "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",
+            "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"
         ]
         _keys_env = os.getenv("TAVILY_API_KEYS", "")
         if _keys_env:
@@ -56,7 +57,7 @@ class Config:
         self.STOCK_LIST = self._parse_stock_list(os.getenv("STOCK_LIST", "601012|隆基绿能,003000|劲仔食品,603039|泛微网络,002407|多氟多,601888|中国中免,002891|中宠股份,603899|晨光股份,601966|玲珑轮胎,002352|顺丰控股,600887|伊利股份,601995|中金公司,603711|香飘飘,601636|旗滨集团"))
 
         # ========== 行业列表配置 ==========
-        self.INDUSTRY_LIST = self._parse_industry_list(os.getenv("INDUSTRY_LIST", "光伏行业|玻璃行业|房地产市场|锂电行业|it软件开发行业|休闲零食"))
+        self.INDUSTRY_LIST = self._parse_industry_list(os.getenv("INDUSTRY_LIST", "光伏行业|房地产市场|锂电行业|it软件开发行业"))
 
         # ========== 搜索配置 ==========
         self.SEARCH_RESULT_COUNT = int(os.getenv("SEARCH_RESULT_COUNT", "5"))

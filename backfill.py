@@ -1,10 +1,12 @@
 """
 个股历史数据回填模块
-补齐过去几个月的股吧/雪球数据 + V3情绪分析
+补齐过去几个月的股吧/雪球/Tavily新闻数据 + V3情绪分析
+- 不修改任何纪要文件，仅写入数据 JSON + 情绪分析结果
 """
 import os
 import json
 import time
+import random
 import requests
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
@@ -205,17 +207,25 @@ class BackfillRunner:
     """个股历史数据回填执行器"""
 
     def __init__(self, config: Config, stock_code: str, months: int = 3,
-                 delay: float = 2.5):
+                 delay: float = 2.5, from_date: str = None, to_date: str = None):
         self.config = config
         self.stock_code = stock_code
         self.months = months
         self.delay = delay
+        self.from_date = from_date  # YYYYMMDD，显式指定起始日期
+        self.to_date = to_date      # YYYYMMDD，显式指定结束日期
 
         stock_info = self._resolve_stock(stock_code)
         self.stock_name = stock_info["name"]
         self.market_cap = stock_info.get("market_cap", 100.0)
 
         self.price_fetcher = HistoricalPriceFetcher()
+
+        from searcher import TavilySearchProvider
+        self.tavily_provider = TavilySearchProvider(
+            api_keys=config.TAVILY_API_KEYS,
+            tavily_time_range_days=getattr(config, 'TAVILY_SEARCH_TIME_RANGE_DAYS', 7)
+        )
 
         from llm import DeepSeekLLMProvider
         self.llm_provider = DeepSeekLLMProvider(
@@ -256,7 +266,7 @@ class BackfillRunner:
         return False
 
     def _scrape_guba(self, date_str: str) -> List[Dict]:
-        """抓取股吧指定日期的帖子"""
+        """抓取股吧指定日期的帖子（逐天接口，保留兼容）"""
         try:
             from guba_scraper import GubaScraper
             scraper = GubaScraper()
@@ -275,6 +285,131 @@ class BackfillRunner:
             logger.warning(f"股吧抓取失败 ({date_str}): {e}")
             return []
 
+    # 股吧反爬限制：单次会话最多安全访问 ~6 页后 IP 被 tarpit
+    GUBA_SAFE_PAGE_LIMIT = 6
+
+    def _estimate_guba_page_for_date(self, target_date_str: str) -> int:
+        """估算目标日期对应的股吧页码。
+
+        股吧按最后回复时间倒序排列，活跃股每天约 80 帖 = 1 页。
+        所以 page ≈ (today - target_date).days。
+        返回估算页码（最小为 1）。
+        """
+        try:
+            target_dt = datetime.strptime(target_date_str, "%Y%m%d")
+            days_ago = (datetime.now() - target_dt).days
+            return max(1, days_ago)
+        except ValueError:
+            return 1
+
+    def _scrape_guba_batch(self, trading_days: List[str]) -> Dict[str, List[Dict]]:
+        """稀疏跳跃式爬取股吧帖子，按日期分配到各交易日。
+
+        股吧反爬严格：顺序翻页在第 7 页触发验证码，随机跳跃约 30 次
+        后 IP 被 tarpit（所有页返回相同内容）。因此本方法：
+
+        1. 估算目标日期范围对应的页码范围
+        2. 从中均匀选取最多 GUBA_SAFE_PAGE_LIMIT 个样本页
+        3. 随机顺序访问，长延迟（8-12s），UA 轮换
+        4. 仅返回成功爬取页中的帖子
+
+        返回: {date_str: [posts]}，大部分交易日列表为空是正常现象。
+        """
+        date_posts: Dict[str, List[Dict]] = {d: [] for d in trading_days}
+        if not trading_days:
+            return date_posts
+
+        try:
+            from guba_scraper import GubaScraper
+            scraper = GubaScraper()
+        except Exception as e:
+            logger.warning(f"股吧爬虫初始化失败: {e}")
+            return date_posts
+
+        # 估算页码范围
+        latest_day = max(trading_days)
+        earliest_day = min(trading_days)
+        page_start = self._estimate_guba_page_for_date(latest_day)
+        page_end = self._estimate_guba_page_for_date(earliest_day)
+
+        # 均匀选取样本页，最多 GUBA_SAFE_PAGE_LIMIT 页
+        total_pages = max(1, page_end - page_start + 1)
+        sample_count = min(self.GUBA_SAFE_PAGE_LIMIT, total_pages)
+        if sample_count <= 1:
+            sample_pages = [page_start]
+        else:
+            step = total_pages / sample_count
+            sample_pages = sorted(set(
+                int(page_start + i * step) for i in range(sample_count)
+            ))
+
+        # 随机打乱访问顺序（避免被检测为顺序扫描）
+        visit_order = list(sample_pages)
+        random.shuffle(visit_order)
+
+        logger.info(
+            f"股吧稀疏采样: {len(trading_days)} 个交易日, "
+            f"页码范围 {page_start}~{page_end}, "
+            f"采样 {len(sample_pages)} 页 (安全上限 {self.GUBA_SAFE_PAGE_LIMIT})"
+        )
+
+        success_count = 0
+        for page in visit_order:
+            if success_count >= self.GUBA_SAFE_PAGE_LIMIT:
+                break
+
+            logger.info(f"  股吧采样页 {page} ...")
+            html = scraper.fetch_list_page(self.stock_code, page)
+
+            # 反爬重试（仅 1 次，节省安全配额）
+            if not html:
+                scraper._rotate_ua()
+                time.sleep(5 + random.random() * 3)
+                html = scraper.fetch_list_page(self.stock_code, page)
+
+            if not html:
+                logger.warning(f"  股吧页 {page} 获取失败（可能触发反爬），跳过")
+                continue
+
+            posts = scraper.extract_posts_from_html(html, self.stock_code)
+            if not posts:
+                logger.info(f"  股吧页 {page} 无帖子")
+                continue
+
+            success_count += 1
+            matched_days = 0
+            for p in posts:
+                pt = p.get("post_time")
+                if not pt:
+                    continue
+                try:
+                    pdt = datetime.strptime(pt, "%Y-%m-%d %H:%M:%S")
+                    pd_str = pdt.strftime("%Y%m%d")
+                    if pd_str in date_posts:
+                        p.setdefault("source_type", "forum")
+                        p.setdefault("source", "guba")
+                        if "content" not in p or not p["content"]:
+                            p["content"] = p.get("title", "")
+                        date_posts[pd_str].append(p)
+                        matched_days += 1
+                except ValueError:
+                    pass
+
+            # 长延迟，避免触发反爬
+            if success_count < self.GUBA_SAFE_PAGE_LIMIT:
+                delay = 8 + random.random() * 4
+                time.sleep(delay)
+            scraper._rotate_ua()
+
+        total = sum(len(v) for v in date_posts.values())
+        days_with = sum(1 for v in date_posts.values() if v)
+        logger.info(
+            f"股吧稀疏采样完成: {success_count}/{len(sample_pages)} 页成功, "
+            f"{total} 帖覆盖 {days_with}/{len(trading_days)} 天 "
+            f"(安全上限 {self.GUBA_SAFE_PAGE_LIMIT} 页，仅覆盖采样页对应的交易日)"
+        )
+        return date_posts
+
     def _search_xueqiu(self, date_str: str) -> List[Dict]:
         """直接爬取雪球指定日期的帖子（不走 Tavily）"""
         scraper = XueqiuScraper()
@@ -286,6 +421,98 @@ class BackfillRunner:
         else:
             logger.debug(f"  雪球无数据 ({date_str})，可能被 WAF 拦截或无当日讨论")
         return posts
+
+    def _prefetch_tavily_news_by_week(self, trading_days: List[str]) -> Dict[str, List[Dict]]:
+        """按周批量搜索 Tavily 新闻，将结果分配到各交易日。
+        3 个月数据从 ~300 次调用降至 ~60 次。
+        """
+        from itertools import groupby
+
+        # 按 ISO 周分组（周一~周日）
+        def week_key(day_str: str):
+            dt = datetime.strptime(day_str, "%Y%m%d")
+            return dt.strftime("%Y-W%W")
+
+        weeks: Dict[str, List[str]] = {}
+        for day in trading_days:
+            wk = week_key(day)
+            if wk not in weeks:
+                weeks[wk] = []
+            weeks[wk].append(day)
+
+        logger.info(f"Tavily 新闻按周批量搜索: {len(trading_days)} 个交易日 → {len(weeks)} 周")
+        day_news: Dict[str, List[Dict]] = {d: [] for d in trading_days}
+
+        for wk, days in weeks.items():
+            first_dt = datetime.strptime(days[0], "%Y%m%d")
+            last_dt = datetime.strptime(days[-1], "%Y%m%d")
+            month_kw = f"{first_dt.year}年{first_dt.month}月"
+
+            news_queries = [
+                f"{self.stock_name} {self.stock_code} 新闻",
+                f"{self.stock_name} 公告",
+                f"{self.stock_name} {self.stock_code} 研报",
+                f"{self.stock_name} {month_kw} 新闻",
+                f"{self.stock_name} {month_kw} 公告",
+            ]
+
+            all_results = []
+            seen_urls = set()
+            for query in news_queries:
+                try:
+                    results = self.tavily_provider.search(
+                        query, max_results=5,
+                        time_range_days=None,
+                        enable_cleanup=True
+                    )
+                    for r in results:
+                        url = r.get("url", "")
+                        if url and url in seen_urls:
+                            continue
+                        seen_urls.add(url)
+                        r["source_type"] = "news"
+                        all_results.append(r)
+                except Exception as e:
+                    logger.debug(f"Tavily 搜索失败 ({query[:30]}): {e}")
+
+            if len(all_results) > 30:
+                all_results = all_results[:30]
+
+            # 分配到该周的交易日
+            dated = {}   # date_str -> [news]
+            undated = []
+            for r in all_results:
+                pd_str = r.get("published_date", "")
+                matched = None
+                if pd_str:
+                    for fmt in ["%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y%m%d"]:
+                        try:
+                            pd_dt = datetime.strptime(pd_str[:10], "%Y-%m-%d")
+                            pd_key = pd_dt.strftime("%Y%m%d")
+                            if pd_key in days:
+                                matched = pd_key
+                            break
+                        except ValueError:
+                            continue
+                if matched:
+                    dated.setdefault(matched, []).append(r)
+                else:
+                    undated.append(r)
+
+            # 无日期新闻均匀分配给该周所有交易日
+            if undated and days:
+                for i, r in enumerate(undated):
+                    day_idx = i % len(days)
+                    dated.setdefault(days[day_idx], []).append(r)
+
+            for d, news in dated.items():
+                day_news[d].extend(news)
+
+            logger.info(f"  {wk}: {len(days)}天, 获取 {len(all_results)} 条新闻")
+
+        total = sum(len(v) for v in day_news.values())
+        logger.info(f"Tavily 新闻批量搜索完成: {total} 条新闻覆盖 {len(trading_days)} 天")
+        return day_news
 
     def _run_v3_emotion(self, posts: List[Dict]) -> Optional[Dict]:
         """运行 V3 多维度情绪分析"""
@@ -395,8 +622,12 @@ class BackfillRunner:
 
     def run(self) -> dict:
         """执行回填主流程"""
-        end_date = datetime.now().strftime("%Y%m%d")
-        beg_date = (datetime.now() - timedelta(days=self.months * 31)).strftime("%Y%m%d")
+        if self.from_date and self.to_date:
+            end_date = self.to_date
+            beg_date = self.from_date
+        else:
+            end_date = datetime.now().strftime("%Y%m%d")
+            beg_date = (datetime.now() - timedelta(days=self.months * 31)).strftime("%Y%m%d")
 
         logger.info(f"开始回填: {self.stock_name}({self.stock_code}), "
                      f"{self.months} 个月 ({beg_date} ~ {end_date})")
@@ -414,7 +645,13 @@ class BackfillRunner:
 
         logger.info(f"共 {len(trading_days)} 个交易日待回填")
 
-        # 2. 遍历交易日
+        # 2. 批量预取 Tavily 新闻（按周分组，大幅减少 API 调用）
+        tavily_news_cache = self._prefetch_tavily_news_by_week(trading_days)
+
+        # 2.5 批量扫描股吧帖子（一次翻页到底，避免每天独立从第1页翻导致的重复请求和反爬）
+        guba_cache = self._scrape_guba_batch(trading_days)
+
+        # 3. 遍历交易日
         completed = 0
         skipped = 0
         failed = 0
@@ -428,19 +665,21 @@ class BackfillRunner:
             logger.info(f"[{i+1}/{len(trading_days)}] 回填 {day} ...")
 
             try:
-                # 抓取股吧
-                guba_posts = self._scrape_guba(day)
+                # 从批量缓存中取股吧帖子
+                guba_posts = guba_cache.get(day, [])
                 # 搜索雪球
                 xueqiu_posts = self._search_xueqiu(day)
-                # 合并
-                all_posts = guba_posts + xueqiu_posts
+                # 从周批量缓存中取 Tavily 新闻
+                tavily_news = tavily_news_cache.get(day, [])
+                # 合并：论坛(股吧+雪球) + 新闻(Tavily)
+                all_posts = guba_posts + xueqiu_posts + tavily_news
 
                 if not all_posts:
-                    logger.info(f"  {day}: 无股吧/雪球数据，跳过")
+                    logger.info(f"  {day}: 无任何数据，跳过")
                     failed += 1
                     continue
 
-                logger.info(f"  股吧 {len(guba_posts)} 帖, 雪球 {len(xueqiu_posts)} 帖")
+                logger.info(f"  股吧 {len(guba_posts)} 帖, 雪球 {len(xueqiu_posts)} 帖, Tavily新闻 {len(tavily_news)} 条")
 
                 # V3 情绪分析
                 v3_dict = self._run_v3_emotion(all_posts)
@@ -487,6 +726,8 @@ def backfill_main(args) -> None:
 
     stock_code = args.backfill
     months = getattr(args, "months", 3)
+    from_date = getattr(args, "from_date", None)
+    to_date = getattr(args, "to_date", None)
 
     # 检查是否需要手动指定股票名
     stock_info = None
@@ -508,10 +749,14 @@ def backfill_main(args) -> None:
             "market_cap": 100.0,
         })
 
-    runner = BackfillRunner(config, stock_code, months=months)
+    runner = BackfillRunner(config, stock_code, months=months,
+                           from_date=from_date, to_date=to_date)
     summary = runner.run()
 
-    print(f"\n回填结果: {summary['stock_name']}({summary['stock_code']})")
+    date_info = ""
+    if from_date:
+        date_info = f" ({from_date} ~ {to_date})"
+    print(f"\n回填结果: {summary['stock_name']}({summary['stock_code']}){date_info}")
     print(f"  交易日总数: {summary['trading_days']}")
     print(f"  成功回填:   {summary['completed']}")
     print(f"  跳过(已存在): {summary['skipped']}")

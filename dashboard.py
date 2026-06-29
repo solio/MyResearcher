@@ -43,8 +43,6 @@ STOCK_METRICS = [
     # 交易
     "current_price", "price_change_pct", "volume_ratio",
     "turnover_rate", "main_net_inflow", "bid_ask_ratio",
-    # V1 情绪
-    "emotion_score_v1",
     # 回填
     "backfill_price",
 ]
@@ -136,11 +134,6 @@ def extract_stock_time_series(force_refresh: bool = False) -> Dict:
 
             all_stocks[stock_code] = stock_name
 
-            # --- V1 情绪值 ---
-            es = result.get("emotion_score")
-            if es is not None:
-                raw_series[stock_code]["emotion_score_v1"][date_str] = _safe_float(es)
-
             # --- V3 情绪 ---
             ev3 = result.get("emotion_v3")
             if ev3:
@@ -202,10 +195,28 @@ def extract_stock_time_series(force_refresh: bool = False) -> Dict:
                 stock_series[metric] = values
         series_output[code] = stock_series
 
+    # 读取情绪阈值（用于论坛活跃度图表展示）
+    thresholds = {}
+    params_file = OUTPUT_DIR / "emotion_params.json"
+    if params_file.exists():
+        try:
+            with open(params_file, "r", encoding="utf-8") as f:
+                ep = json.load(f)
+            for code, sd in ep.get("stocks", {}).items():
+                thresholds[code] = {
+                    "hot_reply": sd.get("guba_hot_reply_threshold"),
+                    "hot_like": sd.get("guba_hot_like_threshold"),
+                    "explosive_reply": 10,  # 来自 config 默认值
+                    "explosive_like": 10,
+                }
+        except Exception:
+            pass
+
     result = {
         "stocks": stocks_list,
         "dates": sorted_dates,
         "series": series_output,
+        "thresholds": thresholds,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -271,7 +282,7 @@ const COLORS = {
   news_score:      { border:'#3fb950', bg:'rgba(63,185,80,0.1)' },
   forum_score:     { border:'#d29922', bg:'rgba(210,153,34,0.1)' },
   trading_score:   { border:'#f78166', bg:'rgba(247,129,102,0.1)' },
-  emotion_score_v1:{ border:'#bc8cff', bg:'rgba(188,140,255,0.1)' },
+
   confidence:      { border:'#8b949e', bg:'rgba(139,148,158,0.1)' },
   total_posts:     { border:'#58a6ff', bg:'rgba(88,166,255,0.1)' },
   hot_posts:       { border:'#f78166', bg:'rgba(247,129,102,0.1)' },
@@ -284,7 +295,7 @@ const COLORS = {
   positive_news:   { border:'#3fb950', bg:'rgba(63,185,80,0.1)' },
   negative_news:   { border:'#f85149', bg:'rgba(248,81,73,0.1)' },
   neutral_news:    { border:'#8b949e', bg:'rgba(139,148,158,0.1)' },
-  current_price:   { border:'#58a6ff', bg:'rgba(88,166,255,0.1)' },
+  current_price:   { border:'#f0883e', bg:'rgba(240,136,62,0.1)' },
   price_change_pct:{ border:'#f78166', bg:'rgba(247,129,102,0.1)' },
   volume_ratio:    { border:'#d29922', bg:'rgba(210,153,34,0.1)' },
   turnover_rate:   { border:'#bc8cff', bg:'rgba(188,140,255,0.1)' },
@@ -301,13 +312,6 @@ const CHART_GROUPS = [
     metrics: ['final_score', 'news_score', 'forum_score', 'trading_score'],
     yLabel: '情绪分 (-3 ~ +3)',
     yMin: -3, yMax: 3
-  },
-  {
-    id: 'emotion_v1',
-    title: '📈 V1 综合情绪值',
-    metrics: ['emotion_score_v1'],
-    yLabel: '情绪值 (-1 ~ +1)',
-    yMin: -1, yMax: 1
   },
   {
     id: 'forum_activity',
@@ -335,7 +339,8 @@ const CHART_GROUPS = [
     title: '📰 新闻情绪分布',
     metrics: ['total_news', 'positive_news', 'negative_news'],
     yLabel: '新闻数',
-    yMin: 0, yMax: null
+    yMin: 0, yMax: null,
+    skipIfAllZero: true
   },
   {
     id: 'price_emotion',
@@ -349,8 +354,10 @@ const CHART_GROUPS = [
     id: 'trading',
     title: '📉 交易指标',
     metrics: ['price_change_pct', 'volume_ratio', 'main_net_inflow'],
-    yLabel: '% / 万元',
-    yMin: null, yMax: null
+    yLabel: '% / 倍',
+    yMin: null, yMax: null,
+    rightAxis: ['main_net_inflow'],
+    rightLabel: '万元'
   },
   {
     id: 'confidence',
@@ -441,7 +448,7 @@ function makeDataset(metric, data, dates, color, yAxisID) {
 function metricLabel(m) {
   const map = {
     final_score:'综合情绪', news_score:'新闻情绪', forum_score:'论坛情绪',
-    trading_score:'交易情绪', confidence:'置信度', emotion_score_v1:'V1情绪值',
+    trading_score:'交易情绪', confidence:'置信度',
     total_posts:'总帖子', hot_posts:'热帖', explosive_posts:'爆值帖',
     bullish_posts:'看多', bearish_posts:'看空', neutral_posts:'中性',
     total_interactions:'总互动', total_news:'总新闻', positive_news:'正面新闻',
@@ -468,12 +475,30 @@ function renderAll() {
     const available = group.metrics.filter(m => stockData[m] && stockData[m].some(v => v !== null));
     if (available.length === 0) return;
 
+    // 如果配置了 skipIfAllZero，检查是否所有值均为 0（如新闻数全为 0 说明管道无新闻数据）
+    if (group.skipIfAllZero) {
+      const hasData = available.some(m => stockData[m].some(v => v !== null && v !== 0));
+      if (!hasData) return;
+    }
+
     // 创建卡片
     const card = document.createElement('div');
     card.className = 'card';
     const title = document.createElement('h2');
     title.textContent = group.title;
     card.appendChild(title);
+
+    // 论坛活跃度：展示热帖/爆值帖的阈值
+    if (group.id === 'forum_activity' && allData.thresholds && allData.thresholds[currentStock]) {
+      const t = allData.thresholds[currentStock];
+      const sub = document.createElement('div');
+      sub.style.cssText = 'font-size:0.75rem;color:#8b949e;margin-bottom:8px;';
+      const hotReply = t.hot_reply ? t.hot_reply.toFixed(1) : '?';
+      const hotLike = t.hot_like ? t.hot_like.toFixed(1) : '?';
+      sub.textContent = `热帖阈值: 回帖≥${hotReply} 点赞≥${hotLike} | 爆值阈值: 回帖≥${t.explosive_reply} 点赞≥${t.explosive_like}`;
+      card.appendChild(sub);
+    }
+
     const canvas = document.createElement('canvas');
     card.appendChild(canvas);
     grid.appendChild(card);
@@ -486,7 +511,8 @@ function renderAll() {
     available.forEach((metric, idx) => {
       const color = COLORS[metric] || { border:'#8b949e', bg:'rgba(139,148,158,0.1)' };
       let yAxisID = 'y';
-      if (group.dualAxis && idx === 1) yAxisID = 'y1';
+      if (group.rightAxis && group.rightAxis.includes(metric)) yAxisID = 'y1';
+      else if (group.dualAxis && idx === 1) yAxisID = 'y1';
       datasets.push(makeDataset(metric, stockData[metric], dates, color, yAxisID));
     });
 
@@ -497,12 +523,12 @@ function renderAll() {
     yOpts.title = { display: true, text: group.yLabel, color: '#8b949e' };
     scales['y'] = yOpts;
 
-    if (group.dualAxis) {
+    if (group.dualAxis || group.rightAxis) {
       scales['y1'] = {
         position: 'right',
         grid: { drawOnChartArea: false },
         ticks: { color: '#8b949e' },
-        title: { display: true, text: '价格(元)', color: '#8b949e' }
+        title: { display: true, text: group.rightLabel || '价格(元)', color: '#8b949e' }
       };
     }
 

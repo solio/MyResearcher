@@ -6,6 +6,7 @@
 import requests
 import time
 import re
+import random
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from urllib.parse import urljoin
@@ -24,15 +25,27 @@ except ImportError:
 class GubaScraper:
     """股吧爬虫"""
 
+    USER_AGENTS = [
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+    ]
+
     def __init__(self):
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": self.USER_AGENTS[0],
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Referer": "https://guba.eastmoney.com/"
         }
         self.session = requests.Session()
         self.session.headers.update(self.headers)
+        self._ua_index = 0
+
+    def _rotate_ua(self):
+        self._ua_index = (self._ua_index + 1) % len(self.USER_AGENTS)
+        self.session.headers["User-Agent"] = self.USER_AGENTS[self._ua_index]
 
     def _parse_time(self, time_str: str) -> Optional[datetime]:
         """
@@ -374,20 +387,31 @@ class GubaScraper:
             days_ago = (datetime.now() - target_dt).days
             if days_ago > 0:
                 scaled_pages = max_pages + days_ago * 3
-                max_pages = min(scaled_pages, 50)  # 最多50页
+                max_pages = min(scaled_pages, 200)  # 最多200页，允许回溯更久
                 logger.info(f"指定日期 {target_date}（{days_ago}天前），翻页数调整为 {max_pages}")
 
             target_date_str = target_dt.strftime("%Y-%m-%d")
 
         found_target_date = False  # 是否已找到目标日期的帖子
         gone_past_target = False   # 是否已翻过目标日期（帖子早于目标日期）
+        consecutive_empty = 0      # 连续无新帖的页数，用于安全终止
 
         for page in range(1, max_pages + 1):
             logger.info(f"正在爬取第 {page}/{max_pages} 页...")
 
-            html = self.fetch_list_page(stock_code, page)
+            # 获取页面，遇到反爬时等待重试
+            html = None
+            for retry in range(3):
+                html = self.fetch_list_page(stock_code, page)
+                if html:
+                    break
+                if retry < 2:
+                    wait = 5 * (retry + 1) + random.random() * 3
+                    logger.warning(f"第{page}页获取失败，{wait:.0f}秒后重试 ({retry+1}/3)...")
+                    self._rotate_ua()
+                    time.sleep(wait)
             if not html:
-                logger.warning(f"第{page}页获取失败，停止爬取")
+                logger.warning(f"第{page}页重试3次仍失败，停止爬取")
                 break
 
             posts = self.extract_posts_from_html(html, stock_code)
@@ -431,11 +455,24 @@ class GubaScraper:
                 all_posts.append(post)
                 new_count += 1
 
+            # 安全终止：连续太多页无新帖
+            if new_count == 0:
+                consecutive_empty += 1
+                if consecutive_empty >= 10:
+                    logger.info(f"连续 {consecutive_empty} 页无新帖，停止爬取")
+                    break
+            else:
+                consecutive_empty = 0
+
             logger.info(f"第{page}页新增 {new_count} 个帖子，累计 {len(all_posts)} 个")
 
-            # 礼貌延迟
+            # 礼貌延迟 + 随机抖动（避免触发反爬）
             if page < max_pages:
-                time.sleep(1)
+                delay = 2.5 + random.random() * 2.0  # 2.5~4.5 秒
+                time.sleep(delay)
+            # 每 10 页换一次 UA
+            if page % 10 == 0:
+                self._rotate_ua()
 
             # 终止条件判断
             if target_dt:

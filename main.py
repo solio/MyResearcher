@@ -4,6 +4,7 @@
 import sys
 import argparse
 import os
+from datetime import datetime
 
 from config import get_config
 from researcher import StockResearcher
@@ -84,7 +85,21 @@ def main():
         "--months",
         type=int,
         default=3,
-        help="回填多少个月的历史数据（默认 3）"
+        help="回填多少个月的历史数据（默认 3）。与 --from-date / --to-date 互斥"
+    )
+    parser.add_argument(
+        "--from-date",
+        type=str,
+        default=None,
+        metavar="YYYYMMDD",
+        help="回填起始日期，如 20260501。需同时指定 --to-date"
+    )
+    parser.add_argument(
+        "--to-date",
+        type=str,
+        default=None,
+        metavar="YYYYMMDD",
+        help="回填结束日期，如 20260615。需同时指定 --from-date"
     )
     parser.add_argument(
         "--stock-name",
@@ -99,11 +114,25 @@ def main():
     target_date = None
     if args.date:
         try:
-            from datetime import datetime
             datetime.strptime(args.date, "%Y%m%d")
             target_date = args.date
         except ValueError:
             print(f"错误: 日期格式无效 '{args.date}'，请使用 YYYYMMDD 格式，如 20260527")
+            sys.exit(1)
+
+    # 验证回填日期范围
+    if bool(args.from_date) != bool(args.to_date):
+        print("错误: --from-date 和 --to-date 必须同时指定")
+        sys.exit(1)
+    if args.from_date:
+        try:
+            datetime.strptime(args.from_date, "%Y%m%d")
+            datetime.strptime(args.to_date, "%Y%m%d")
+        except ValueError:
+            print(f"错误: 日期格式无效，请使用 YYYYMMDD 格式")
+            sys.exit(1)
+        if args.from_date > args.to_date:
+            print(f"错误: --from-date ({args.from_date}) 不能晚于 --to-date ({args.to_date})")
             sys.exit(1)
 
     if args.backfill:
