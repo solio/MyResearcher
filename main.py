@@ -78,21 +78,24 @@ def supplement_news(data_file: str):
     results_data = data.get("results", [])
     date_str = data.get("date", "")
 
-    # 统计缺失新闻的标的
-    missing_news = []
+    # 统计需要补充的标的（缺少新闻或缺少雪球）
+    need_supplement = []
     for r in results_data:
         news_count = sum(1 for n in r.get("news_list", [])
                         if n.get("source_type") == "news" and not n.get("is_warning"))
-        if news_count == 0 and r["target_type"] == "stock":
-            missing_news.append(r)
-        elif news_count == 0 and r["target_type"] == "industry":
-            missing_news.append(r)
+        xueqiu_count = sum(1 for n in r.get("news_list", [])
+                          if n.get("source") == "xueqiu")
+        if r["target_type"] == "stock":
+            if news_count == 0 or xueqiu_count == 0:
+                need_supplement.append(r)
+        elif news_count == 0:
+            need_supplement.append(r)
 
-    if not missing_news:
-        logger.info("所有标的已有新闻数据，无需补充")
+    if not need_supplement:
+        logger.info("所有标的已有新闻+雪球数据，无需补充")
         return
 
-    logger.info(f"共 {len(missing_news)} 个标的缺少新闻数据，开始补充...")
+    logger.info(f"共 {len(need_supplement)} 个标的需补充（新闻/雪球），开始...")
 
     # 初始化搜索
     provider = TavilySearchProvider(
@@ -124,19 +127,26 @@ def supplement_news(data_file: str):
         stock_code = code_match.group(1) if code_match else None
         stock_name = target_name.split("(")[0] if "(" in target_name else target_name
 
-        # 检查是否需要补充
+        # 检查是否需要补充（新闻或雪球任一缺失都要补）
         news_count = sum(1 for n in r.get("news_list", [])
                         if n.get("source_type") == "news" and not n.get("is_warning"))
-        if news_count > 0:
+        xueqiu_count = sum(1 for n in r.get("news_list", [])
+                          if n.get("source") == "xueqiu")
+        if news_count > 0 and xueqiu_count > 0:
+            logger.info(f"  跳过 {target_name}（已有 {news_count} 条新闻 + {xueqiu_count} 条雪球）")
+            continue
+        if r["target_type"] == "industry" and news_count > 0:
             logger.info(f"  跳过 {target_name}（已有 {news_count} 条新闻）")
             continue
 
         logger.info(f">>> 补充新闻: {target_name}")
 
         try:
-            # 搜索新闻
+            all_new_items = []
+
+            # ========== 1. 搜索 Tavily 新闻 ==========
             if r["target_type"] == "stock":
-                queries = [
+                news_queries = [
                     f"{stock_name} {stock_code} 最新新闻",
                     f"{stock_name} 股票分析 研报",
                     f"{stock_name} 最新消息 公告",
@@ -144,14 +154,13 @@ def supplement_news(data_file: str):
                     f"{stock_name} {stock_code} 券商研报",
                 ]
             else:
-                queries = [
+                news_queries = [
                     f"{r['target_name']} 最新动态",
                     f"{r['target_name']} 行业分析",
                     f"{r['target_name']} 发展趋势",
                 ]
 
-            all_news = []
-            for q in queries:
+            for q in news_queries:
                 try:
                     results = provider.search(q, max_results=8,
                                               time_range_days=config.TAVILY_SEARCH_TIME_RANGE_DAYS,
@@ -160,47 +169,73 @@ def supplement_news(data_file: str):
                         if not deduplicator.is_duplicate(item):
                             deduplicator.add(item)
                             item["source_type"] = "news"
-                            all_news.append(item)
+                            all_new_items.append(item)
                 except Exception as e:
-                    logger.warning(f"  搜索失败: {q[:30]}... {e}")
+                    logger.warning(f"  新闻搜索失败: {q[:30]}... {e}")
 
-            if all_news:
-                logger.info(f"  获得 {len(all_news)} 条新闻")
-                # 合并到现有news_list
+            logger.info(f"  Tavily新闻: {len([x for x in all_new_items if x.get('source_type')=='news'])} 条")
+
+            # ========== 2. 搜索雪球论坛 ==========
+            if r["target_type"] == "stock" and config.ENABLE_FORUM_SEARCH:
+                xueqiu_queries = [
+                    f"site:xueqiu.com {stock_name} {stock_code} 分析",
+                    f"site:xueqiu.com {stock_name} {stock_code} 讨论",
+                    f"{stock_name} 雪球 分析",
+                ]
+                for q in xueqiu_queries:
+                    try:
+                        results = provider.search(q, max_results=4,
+                                                  time_range_days=config.TAVILY_SEARCH_TIME_RANGE_DAYS,
+                                                  enable_cleanup=True)
+                        for item in results:
+                            if not deduplicator.is_duplicate(item):
+                                deduplicator.add(item)
+                                item["source_type"] = "forum"
+                                item["source"] = "xueqiu"
+                                all_new_items.append(item)
+                    except Exception as e:
+                        logger.warning(f"  雪球搜索失败: {q[:30]}... {e}")
+
+                logger.info(f"  雪球: {len([x for x in all_new_items if x.get('source')=='xueqiu'])} 条")
+
+            # ========== 3. 合并数据 ==========
+            if all_new_items:
                 existing = r.get("news_list", [])
-                r["news_list"] = all_news + existing
-
-                # 重新分类帖子
-                stock_info = stock_map.get(stock_code, {"code": stock_code or "", "name": stock_name, "market_cap": 100.0})
-                classified = emotion.classify_posts(r["news_list"], stock_info)
-
-                # 重跑 V3 情绪
-                import emotion_v3
-                v3 = emotion_v3.analyze_emotion_v3(
-                    posts=r["news_list"],
-                    stock_name=stock_name,
-                    stock_code=stock_code or "",
-                    market_cap=stock_info.get("market_cap", 100.0),
-                    llm_provider=llm,
-                    news_weight=0.2, forum_weight=0.5, trading_weight=0.3
-                )
-                if v3:
-                    from dataclasses import asdict
-                    r["emotion_v3"] = emotion_v3.emotion_score_v3_to_dict(v3)
-                    r["emotion_score"] = v3.final_score / 3.0
-                    logger.info(f"  V3重算: {v3.rating_emoji} {v3.rating_level} ({v3.final_score:.3f})")
-
-                # 重新生成分析
-                new_analysis = analyzer.analyze_news_with_sentiment(
-                    r["news_list"], target_name, r["target_type"],
-                    r.get("emotion_score", 0), classified
-                )
-                if new_analysis and new_analysis != "分析失败":
-                    r["analysis"] = new_analysis
-
-                updated_count += 1
+                seen = set(n.get("url", "") for n in existing)
+                truly_new = [x for x in all_new_items if x.get("url", "") not in seen]
+                r["news_list"] = truly_new + existing
+                logger.info(f"  合并新增: {len(truly_new)} 条 (新闻+雪球)，共 {len(r['news_list'])} 条")
             else:
-                logger.warning(f"  {target_name} 未获取到新闻")
+                logger.warning(f"  {target_name} 未获取到新数据，跳过重算")
+                continue
+
+            # ========== 4. 重算 V3 情绪 & 分析 ==========
+            stock_info = stock_map.get(stock_code, {"code": stock_code or "", "name": stock_name, "market_cap": 100.0})
+            classified = emotion.classify_posts(r["news_list"], stock_info)
+
+            import emotion_v3
+            v3 = emotion_v3.analyze_emotion_v3(
+                posts=r["news_list"],
+                stock_name=stock_name,
+                stock_code=stock_code or "",
+                market_cap=stock_info.get("market_cap", 100.0),
+                llm_provider=llm,
+                news_weight=0.2, forum_weight=0.5, trading_weight=0.3
+            )
+            if v3:
+                r["emotion_v3"] = emotion_v3.emotion_score_v3_to_dict(v3)
+                r["emotion_score"] = v3.final_score / 3.0
+                logger.info(f"  V3重算: {v3.rating_emoji} {v3.rating_level} ({v3.final_score:.3f})")
+
+            new_analysis = analyzer.analyze_news_with_sentiment(
+                r["news_list"], target_name, r["target_type"],
+                r.get("emotion_score", 0), classified
+            )
+            if new_analysis and new_analysis != "分析失败":
+                r["analysis"] = new_analysis
+                r["failure_reason"] = ""
+
+            updated_count += 1
 
         except Exception as e:
             logger.error(f"  补充 {target_name} 失败: {e}")
