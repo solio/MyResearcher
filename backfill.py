@@ -149,22 +149,8 @@ class BackfillRunner:
 
     def _check_already_backfilled(self, date_str: str) -> bool:
         """检查某日期是否已有该股票的数据"""
-        date_dir = os.path.join(self.config.OUTPUT_DIR, date_str)
-        if not os.path.isdir(date_dir):
-            return False
-        target_name = f"{self.stock_name}({self.stock_code})"
-        for fname in os.listdir(date_dir):
-            if fname.endswith("数据.json"):
-                fpath = os.path.join(date_dir, fname)
-                try:
-                    with open(fpath, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    for r in data.get("results", []):
-                        if r.get("target_name") == target_name:
-                            return True
-                except Exception:
-                    continue
-        return False
+        from database import check_backfilled
+        return check_backfilled(date_str, self.stock_code)
 
     def _scrape_guba(self, date_str: str) -> List[Dict]:
         """抓取股吧指定日期的帖子（逐天接口，保留兼容）"""
@@ -483,11 +469,9 @@ class BackfillRunner:
         emotion_v3["trading_score"] = trading_score
 
     def _save_day_data(self, date_str: str, v3_dict: Optional[Dict],
-                        posts: List[Dict]) -> str:
-        """保存单日数据到 output/YYYYMMDD/ 目录"""
-        output_dir = self.config.get_output_dir_for_date(date_str)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        data_file = os.path.join(output_dir, f"{ts}-数据.json")
+                        posts: List[Dict]) -> int:
+        """保存单日数据到数据库，返回 result_id"""
+        from database import insert_run, insert_result
 
         target_name = f"{self.stock_name}({self.stock_code})"
         result = {
@@ -507,19 +491,9 @@ class BackfillRunner:
             "emotion_v3": v3_dict or {},
         }
 
-        data = {
-            "date": date_str,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "results": [result],
-            "search_provider": "backfill",
-            "backfill": True,
-        }
-
-        os.makedirs(output_dir, exist_ok=True)
-        with open(data_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-
-        return data_file
+        run_id = insert_run(date_str, search_provider="backfill", is_backfill=True)
+        result_id = insert_result(run_id, result)
+        return result_id
 
     def run(self) -> dict:
         """执行回填主流程"""
@@ -589,9 +563,9 @@ class BackfillRunner:
                 if v3_dict and day in prices:
                     self._override_trading_with_kline(v3_dict, prices[day])
 
-                # 保存
-                saved_path = self._save_day_data(day, v3_dict, all_posts)
-                logger.info(f"  ✓ 已保存: {saved_path}")
+                # 保存到数据库
+                result_id = self._save_day_data(day, v3_dict, all_posts)
+                logger.info(f"  ✓ 已保存: result_id={result_id}")
                 completed += 1
 
             except Exception as e:

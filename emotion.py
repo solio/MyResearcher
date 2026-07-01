@@ -135,29 +135,27 @@ class EmotionAnalyzer:
         self._load_params()
 
     def _load_params(self):
-        """加载历史参数"""
-        if os.path.exists(self.config.EMOTION_DATA_FILE):
-            try:
-                with open(self.config.EMOTION_DATA_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    for stock_code, param_data in data.get("stocks", {}).items():
-                        # 重构 StockEmotionParams
-                        param = StockEmotionParams(
-                            stock_code=param_data["stock_code"],
-                            stock_name=param_data["stock_name"],
-                            market_cap=param_data["market_cap"]
-                        )
-                        param.guba_hot_reply_threshold = param_data.get("guba_hot_reply_threshold", 2.0)
-                        param.guba_hot_like_threshold = param_data.get("guba_hot_like_threshold", 2.0)
-                        param.history = param_data.get("history", [])
-                        self.stock_params[stock_code] = param
+        """加载历史参数（从数据库）"""
+        from database import load_emotion_params
+        try:
+            data = load_emotion_params()
+            for stock_code, param_data in data.get("stocks", {}).items():
+                param = StockEmotionParams(
+                    stock_code=param_data["stock_code"],
+                    stock_name=param_data["stock_name"],
+                    market_cap=param_data["market_cap"]
+                )
+                param.guba_hot_reply_threshold = param_data.get("guba_hot_reply_threshold", 2.0)
+                param.guba_hot_like_threshold = param_data.get("guba_hot_like_threshold", 2.0)
+                param.history = param_data.get("history", [])
+                self.stock_params[stock_code] = param
+            if self.stock_params:
                 logger.info(f"已加载情绪参数: {len(self.stock_params)} 只股票")
-            except Exception as e:
-                logger.warning(f"加载情绪参数失败: {e}")
+        except Exception as e:
+            logger.warning(f"加载情绪参数失败: {e}")
 
     def save_params(self):
-        """保存参数到文件"""
-        os.makedirs(os.path.dirname(self.config.EMOTION_DATA_FILE), exist_ok=True)
+        """保存参数到数据库"""
         data = {
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "stocks": {
@@ -173,8 +171,8 @@ class EmotionAnalyzer:
             }
         }
         try:
-            with open(self.config.EMOTION_DATA_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            from database import save_emotion_params
+            save_emotion_params(data)
             logger.info("情绪参数已保存")
         except Exception as e:
             logger.error(f"保存情绪参数失败: {e}")

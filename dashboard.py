@@ -13,22 +13,18 @@
 import json
 import os
 import sys
-import time
 import argparse
-from pathlib import Path
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, List, Optional
 from collections import defaultdict
+from urllib.parse import urlparse, parse_qs
 
 from logger import get_logger
 
 logger = get_logger()
 
 # ==================== 数据提取层 ====================
-
-OUTPUT_DIR = Path(__file__).parent / "output"
-CACHE_FILE = Path(__file__).parent / "output" / "dashboard_cache.json"
 
 # 关心的指标列表
 STOCK_METRICS = [
@@ -58,127 +54,84 @@ def _safe_float(val, default=None):
         return default
 
 
-def _find_data_files() -> Dict[str, List[Path]]:
-    """扫描 output/ 目录，按日期归类数据文件路径。返回 {date_str: [path, ...]}"""
-    date_files = defaultdict(list)
-    if not OUTPUT_DIR.exists():
-        return date_files
-
-    for entry in sorted(OUTPUT_DIR.iterdir()):
-        if not entry.is_dir():
-            continue
-        dir_name = entry.name
-        # 只匹配 YYYYMMDD 格式的目录
-        if len(dir_name) != 8 or not dir_name.isdigit():
-            continue
-        for f in entry.glob("*数据.json"):
-            date_files[dir_name].append(f)
-
-    return dict(date_files)
+def _find_data_files() -> Dict[str, List]:
+    """保留函数签名以供兼容，实际已改用数据库"""
+    return {}
 
 
 def extract_stock_time_series(force_refresh: bool = False) -> Dict:
-    """
-    从所有历史数据文件中提取每只股票的时间序列。
-    结果缓存到 dashboard_cache.json，后续加载优先用缓存。
-    """
-    if not force_refresh and CACHE_FILE.exists():
-        cache_age = time.time() - CACHE_FILE.stat().st_mtime
-        if cache_age < 3600:  # 1 小时内不过期
-            try:
-                with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                    logger.info(f"加载缓存: {CACHE_FILE} ({(cache_age/60):.0f}分钟前)")
-                    return json.load(f)
-            except Exception:
-                pass
+    """从数据库提取每只股票的时间序列"""
+    from database import init_db, get_all_stock_results, load_emotion_thresholds
 
-    logger.info("正在从 output/ 提取时间序列数据...")
-    date_files = _find_data_files()
-    if not date_files:
-        logger.warning("未找到任何数据文件")
+    init_db()
+    logger.info("正在从数据库提取时间序列数据...")
+    rows = get_all_stock_results()
+
+    if not rows:
+        logger.warning("数据库中无数据")
         return {"stocks": [], "dates": [], "series": {}}
 
-    # 按日期排序
-    sorted_dates = sorted(date_files.keys())
-    logger.info(f"发现 {len(sorted_dates)} 个日期目录，"
-                f"共 {sum(len(v) for v in date_files.values())} 个数据文件")
-
-    # 收集所有股票代码
-    all_stocks: Dict[str, str] = {}  # code -> name
+    # 收集所有股票和日期
+    all_stocks: Dict[str, str] = {}
+    all_dates_set = set()
     raw_series: Dict[str, Dict[str, Dict[str, float]]] = defaultdict(
-        lambda: defaultdict(dict))  # code -> metric -> date -> value
+        lambda: defaultdict(dict))
 
-    for date_str in sorted_dates:
-        # 取该日期最新的数据文件
-        files = sorted(date_files[date_str], reverse=True)
-        data_file = files[0]
-
-        try:
-            with open(data_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:
-            logger.debug(f"跳过 {data_file}: {e}")
+    for row in rows:
+        code = row.get("stock_code", "")
+        if not code:
             continue
+        # 从 target_name 提取名称
+        tn = row.get("target_name", "")
+        name = tn.split("(")[0] if "(" in tn else tn
+        all_stocks[code] = name
 
-        for result in data.get("results", []):
-            if result.get("target_type") != "stock":
-                continue
+        date_str = row.get("date", "")
+        all_dates_set.add(date_str)
 
-            target_name = result.get("target_name", "")
-            # 从 "隆基绿能(601012)" 解析代码
-            if "(" in target_name and ")" in target_name:
-                stock_name = target_name.split("(")[0]
-                stock_code = target_name.split("(")[1].rstrip(")")
-            else:
-                continue
+        # V3 情绪
+        for key in ["final_score", "news_score", "forum_score",
+                    "trading_score", "confidence"]:
+            val = row.get(key)
+            if val is not None:
+                raw_series[code][key][date_str] = _safe_float(val)
 
-            all_stocks[stock_code] = stock_name
+        # 论坛指标
+        fm = row.get("forum_metrics")
+        if fm:
+            for key in ["total_posts", "hot_posts", "explosive_posts",
+                        "bullish_posts", "bearish_posts", "neutral_posts",
+                        "total_interactions"]:
+                val = fm.get(key)
+                if val is not None:
+                    raw_series[code][key][date_str] = _safe_float(val, 0)
 
-            # --- V3 情绪 ---
-            ev3 = result.get("emotion_v3")
-            if ev3:
-                for key in ["final_score", "news_score", "forum_score",
-                            "trading_score", "confidence"]:
-                    val = ev3.get(key)
-                    if val is not None:
-                        raw_series[stock_code][key][date_str] = _safe_float(val)
+        # 新闻指标
+        nm = row.get("news_metrics")
+        if nm:
+            for key in ["total_news", "positive_news", "negative_news",
+                        "neutral_news"]:
+                val = nm.get(key)
+                if val is not None:
+                    raw_series[code][key][date_str] = _safe_float(val, 0)
 
-                # 论坛指标
-                fm = ev3.get("forum_metrics")
-                if fm:
-                    for key in ["total_posts", "hot_posts", "explosive_posts",
-                                "bullish_posts", "bearish_posts", "neutral_posts",
-                                "total_interactions"]:
-                        val = fm.get(key)
-                        if val is not None:
-                            raw_series[stock_code][key][date_str] = _safe_float(val, 0)
+        # 交易指标
+        tm = row.get("trading_metrics")
+        if tm:
+            for key in ["current_price", "price_change_pct",
+                        "volume_ratio", "turnover_rate",
+                        "main_net_inflow", "bid_ask_ratio"]:
+                val = tm.get(key)
+                if val is not None:
+                    raw_series[code][key][date_str] = _safe_float(val)
 
-                # 新闻指标
-                nm = ev3.get("news_metrics")
-                if nm:
-                    for key in ["total_news", "positive_news", "negative_news",
-                                "neutral_news"]:
-                        val = nm.get(key)
-                        if val is not None:
-                            raw_series[stock_code][key][date_str] = _safe_float(val, 0)
+            # 回填数据
+            if row.get("is_backfill"):
+                val = tm.get("current_price")
+                if val is not None:
+                    raw_series[code]["backfill_price"][date_str] = _safe_float(val)
 
-                # 交易指标
-                tm = ev3.get("trading_metrics")
-                if tm:
-                    for key in ["current_price", "price_change_pct",
-                                "volume_ratio", "turnover_rate",
-                                "main_net_inflow", "bid_ask_ratio"]:
-                        val = tm.get(key)
-                        if val is not None:
-                            raw_series[stock_code][key][date_str] = _safe_float(val)
-
-                    # 回填数据：单独记录回填日的股价（来自 K 线收盘价）
-                    if data.get("backfill"):
-                        val = tm.get("current_price")
-                        if val is not None:
-                            raw_series[stock_code]["backfill_price"][date_str] = _safe_float(val)
-
-    # 构建最终输出：补全缺失日期为 None（Chart.js 会跳过）
+    sorted_dates = sorted(all_dates_set)
     stocks_list = [{"code": c, "name": n} for c, n in all_stocks.items()]
     series_output = {}
 
@@ -189,47 +142,32 @@ def extract_stock_time_series(force_refresh: bool = False) -> Dict:
             values = []
             for d in sorted_dates:
                 v = metric_data.get(d)
-                values.append(v)  # None for missing, Chart.js spanGaps or skip
-            # 如果整列全 None 就跳过
+                values.append(v)
             if any(v is not None for v in values):
                 stock_series[metric] = values
         series_output[code] = stock_series
 
-    # 读取情绪阈值（用于论坛活跃度图表展示）
+    # 阈值从数据库加载
     thresholds = {}
-    params_file = OUTPUT_DIR / "emotion_params.json"
-    if params_file.exists():
-        try:
-            with open(params_file, "r", encoding="utf-8") as f:
-                ep = json.load(f)
-            for code, sd in ep.get("stocks", {}).items():
-                thresholds[code] = {
-                    "hot_reply": sd.get("guba_hot_reply_threshold"),
-                    "hot_like": sd.get("guba_hot_like_threshold"),
-                    "explosive_reply": 10,  # 来自 config 默认值
-                    "explosive_like": 10,
-                }
-        except Exception:
-            pass
+    try:
+        threshold_data = load_emotion_thresholds(list(all_stocks.keys()))
+        for code, td in threshold_data.items():
+            thresholds[code] = {
+                "hot_reply": td.get("hot_reply_threshold"),
+                "hot_like": td.get("hot_like_threshold"),
+                "explosive_reply": 10,
+                "explosive_like": 10,
+            }
+    except Exception:
+        pass
 
-    result = {
+    return {
         "stocks": stocks_list,
         "dates": sorted_dates,
         "series": series_output,
         "thresholds": thresholds,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
-
-    # 写缓存
-    try:
-        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False)
-        logger.info(f"缓存已更新: {CACHE_FILE}")
-    except Exception as e:
-        logger.warning(f"缓存写入失败: {e}")
-
-    return result
 
 
 # ==================== HTTP 服务层 ====================
@@ -260,6 +198,31 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 .loading { text-align:center; padding:60px; color:#8b949e; font-size:1.1rem; }
 .footer { text-align:center; padding:16px; color:#484f58; font-size:0.75rem;
           border-top:1px solid #30363d; margin-top:16px; }
+.posts-section { margin:0 16px 16px 16px; background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px; }
+.posts-header { display:flex; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+.posts-header h2 { font-size:0.95rem; color:#58a6ff; font-weight:600; margin:0; }
+.posts-header select { background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:4px 10px; border-radius:6px; font-size:0.85rem; cursor:pointer; }
+.posts-header select:focus { outline:none; border-color:#58a6ff; }
+.day-tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; padding-bottom:8px; border-bottom:1px solid #30363d; }
+.day-tab { padding:4px 12px; background:#21262d; border:1px solid #30363d; border-radius:16px; color:#8b949e; font-size:0.8rem; cursor:pointer; transition:all .15s; white-space:nowrap; }
+.day-tab:hover { border-color:#58a6ff; color:#c9d1d9; }
+.day-tab.active { background:#1f6feb33; border-color:#58a6ff; color:#58a6ff; }
+.post-list { max-height:500px; overflow-y:auto; }
+.post-list::-webkit-scrollbar { width:6px; }
+.post-list::-webkit-scrollbar-track { background:#0d1117; }
+.post-list::-webkit-scrollbar-thumb { background:#30363d; border-radius:3px; }
+.post-list::-webkit-scrollbar-thumb:hover { background:#484f58; }
+.post-item { padding:10px 12px; border-bottom:1px solid #21262d; display:flex; align-items:flex-start; gap:10px; }
+.post-item:last-child { border-bottom:none; }
+.post-item:hover { background:#1c2128; }
+.post-title { color:#c9d1d9; font-size:0.85rem; text-decoration:none; line-height:1.4; flex:1; word-break:break-all; }
+.post-title:hover { color:#58a6ff; }
+.post-meta { display:flex; gap:12px; font-size:0.75rem; color:#8b949e; margin-top:4px; flex-wrap:wrap; }
+.post-meta span { white-space:nowrap; }
+.badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:0.7rem; font-weight:600; flex-shrink:0; margin-top:2px; }
+.badge-explosive { background:#f8514933; color:#f85149; }
+.badge-hot { background:#f7816633; color:#f78166; }
+.post-empty { text-align:center; padding:32px; color:#8b949e; font-size:0.9rem; }
 @media (max-width:600px) { .grid { grid-template-columns:1fr; } }
 </style>
 </head>
@@ -270,6 +233,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   <span class="info" id="info"></span>
 </div>
 <div class="grid" id="charts"></div>
+<div class="posts-section" id="postsSection" style="display:none;">
+  <div class="posts-header">
+    <h2>📋 帖子列表</h2>
+    <select id="monthSelect" onchange="onMonthChange()">
+      <option value="">选择月份</option>
+    </select>
+  </div>
+  <div class="day-tabs" id="dayTabs"></div>
+  <div class="post-list" id="postList"></div>
+</div>
 <div class="footer">数据来源: output/ 目录 · 自动生成</div>
 
 <script>
@@ -277,6 +250,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 let allData = null;
 let currentStock = null;
 let charts = {};
+let postsData = null;
+let currentMonth = null;
+let currentDay = null;
+
+function classifyRank(p) {
+  if (p.read_count > 10000 || p.reply_count > 50) return 0;
+  if (p.read_count > 5000 || p.reply_count > 20) return 1;
+  return 2;
+}
 const COLORS = {
   final_score:     { border:'#58a6ff', bg:'rgba(88,166,255,0.1)' },
   news_score:      { border:'#3fb950', bg:'rgba(63,185,80,0.1)' },
@@ -415,6 +397,7 @@ fetch('/api/data')
       `日期范围: ${data.dates[0]} ~ ${data.dates[data.dates.length-1]} · ${data.dates.length}天 · ${data.stocks.length}只股票`;
     renderAll();
     document.getElementById('charts').classList.remove('loading');
+    loadPostMonths();
   })
   .catch(e => {
     document.getElementById('charts').innerHTML =
@@ -428,6 +411,135 @@ document.getElementById('charts').innerHTML =
 function switchStock() {
   currentStock = document.getElementById('stockSelect').value;
   renderAll();
+  loadPostMonths();
+}
+
+// ===== 帖子列表 =====
+async function loadPostsForMonth(yearMonth) {
+  const resp = await fetch(`/api/posts?stock_code=${currentStock}&year_month=${yearMonth}`);
+  const data = await resp.json();
+  if (data.error) { console.error(data.error); return; }
+
+  postsData = data;
+  currentMonth = yearMonth;
+  currentDay = null;
+
+  const availableMonths = data.available_months || [];
+  const sel = document.getElementById('monthSelect');
+  sel.innerHTML = '<option value="">选择月份</option>';
+  availableMonths.forEach(ym => {
+    const opt = document.createElement('option');
+    opt.value = ym;
+    opt.textContent = ym.substring(0,4) + '-' + ym.substring(4,6);
+    if (ym === yearMonth) opt.selected = true;
+    sel.appendChild(opt);
+  });
+
+  renderDayTabs();
+  document.getElementById('postsSection').style.display = 'block';
+}
+
+function loadPostMonths() {
+  if (!allData || !allData.dates || allData.dates.length === 0) return;
+  const latestDate = allData.dates[allData.dates.length - 1];
+  const latestMonth = latestDate.substring(0, 6);
+  loadPostsForMonth(latestMonth);
+}
+
+function onMonthChange() {
+  const val = document.getElementById('monthSelect').value;
+  if (val) {
+    loadPostsForMonth(val);
+  } else {
+    currentMonth = null;
+    currentDay = null;
+    document.getElementById('dayTabs').innerHTML = '';
+    document.getElementById('postList').innerHTML = '';
+  }
+}
+
+function renderDayTabs() {
+  const container = document.getElementById('dayTabs');
+  container.innerHTML = '';
+
+  if (!postsData || !postsData.dates || Object.keys(postsData.dates).length === 0) {
+    container.innerHTML = '<span class="post-empty" style="padding:8px;">该月暂无帖子</span>';
+    document.getElementById('postList').innerHTML = '';
+    return;
+  }
+
+  const dates = Object.keys(postsData.dates).sort();
+  dates.forEach(d => {
+    const tab = document.createElement('span');
+    tab.className = 'day-tab';
+    tab.textContent = d.substring(4,6) + '-' + d.substring(6,8);
+    tab.onclick = () => { currentDay = d; renderDayTabs(); renderPostList(); };
+    if (d === currentDay) tab.classList.add('active');
+    container.appendChild(tab);
+  });
+
+  if (!currentDay && dates.length > 0) {
+    currentDay = dates[0];
+    renderDayTabs();
+    return;
+  }
+  renderPostList();
+}
+
+function renderPostList() {
+  const container = document.getElementById('postList');
+  container.innerHTML = '';
+
+  if (!postsData || !postsData.dates || !currentDay) {
+    container.innerHTML = '<div class="post-empty">请选择日期查看帖子</div>';
+    return;
+  }
+
+  let posts = postsData.dates[currentDay] || [];
+  if (posts.length === 0) {
+    container.innerHTML = '<div class="post-empty">该日期暂无帖子</div>';
+    return;
+  }
+
+  // 排序：爆 > 热 > 普通，同类按阅读量降序
+  posts = [...posts].sort((a, b) => {
+    const d = classifyRank(a) - classifyRank(b);
+    if (d !== 0) return d;
+    return (b.read_count || 0) - (a.read_count || 0);
+  });
+
+  posts.forEach(post => {
+    const item = document.createElement('div');
+    item.className = 'post-item';
+
+    const rank = classifyRank(post);
+    const badge = document.createElement('span');
+    if (rank === 0) { badge.className = 'badge badge-explosive'; badge.textContent = '爆'; }
+    else if (rank === 1) { badge.className = 'badge badge-hot'; badge.textContent = '热'; }
+    else { badge.style.cssText = 'flex-shrink:0; margin-top:2px;'; badge.innerHTML = '&nbsp;'; }
+
+    const titleEl = document.createElement('a');
+    titleEl.className = 'post-title';
+    titleEl.textContent = post.title || '(无标题)';
+    if (post.url) { titleEl.href = post.url; titleEl.target = '_blank'; titleEl.rel = 'noopener'; }
+
+    const meta = document.createElement('div');
+    meta.className = 'post-meta';
+    meta.innerHTML =
+      `<span>📖 ${post.read_count || 0}</span>` +
+      `<span>💬 ${post.reply_count || 0}</span>` +
+      `<span>👍 ${post.like_count || 0}</span>` +
+      (post.source ? `<span>${post.source}</span>` : '');
+
+    const wrap = document.createElement('div');
+    wrap.style.flex = '1';
+    wrap.appendChild(titleEl);
+    wrap.appendChild(meta);
+
+    item.appendChild(badge);
+    item.appendChild(wrap);
+    container.appendChild(item);
+  });
 }
 
 function makeDataset(metric, data, dates, color, yAxisID) {
@@ -583,6 +695,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             DashboardHandler.dashboard_data = extract_stock_time_series(
                 force_refresh=True)
             self._send_json({"status": "ok", "message": "缓存已刷新"})
+        elif self.path.startswith("/api/posts"):
+            qs = parse_qs(urlparse(self.path).query)
+            stock_code = qs.get("stock_code", [None])[0]
+            year_month = qs.get("year_month", [None])[0]
+            if not stock_code or not year_month:
+                self._send_json({"error": "Missing stock_code or year_month"}, 400)
+            else:
+                from database import get_posts_by_stock_month
+                data = get_posts_by_stock_month(stock_code, year_month)
+                self._send_json(data)
         else:
             self.send_response(404)
             self.end_headers()

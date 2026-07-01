@@ -147,7 +147,7 @@ class HistoryManager:
 
     def load_yesterday_summary(self, target_name: str) -> Optional[str]:
         """
-        加载昨日的摘要
+        加载昨日的摘要（从数据库）
 
         Args:
             target_name: 研究目标名称
@@ -164,17 +164,10 @@ class HistoryManager:
             logger.debug(f"昨日({yesterday})早于历史起始日期({self.history_start_date})，跳过历史对比")
             return None
 
-        data_file = self._find_latest_data_file(yesterday)
-        if not data_file:
-            return None
-
         try:
-            with open(data_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            for result in data.get("results", []):
-                if result.get("target_name") == target_name:
-                    return result.get("summary", "")
+            from database import get_yesterday_summary
+            summary = get_yesterday_summary(target_name, yesterday)
+            return summary if summary else None
         except Exception as e:
             logger.warning(f"加载昨日数据失败: {e}")
 
@@ -599,18 +592,20 @@ class StockResearcher:
 
     def _save_data_incremental(self, results: List[ResearchResult],
                                 output_dir: str) -> None:
-        """增量保存JSON数据文件（每次覆盖写入全部已分析结果）"""
+        """增量保存到数据库（删旧写新，确保幂等）"""
         if self.search_provider_type != "tavily":
             return
-        data_file = os.path.join(output_dir, f"{self.now_str}-数据.json")
-        data = {
-            "date": self.today_str,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "results": [r.to_dict() for r in results],
-            "search_provider": "tavily"
-        }
-        with open(data_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        from database import get_or_create_run, insert_result, get_db, init_db
+        init_db()
+        db = get_db()
+        run_id = get_or_create_run(self.today_str, "tavily")
+        # 删除该 run 的已有结果，再全量重写（确保去重）
+        db.execute("DELETE FROM emotion_v3 WHERE result_id IN (SELECT id FROM results WHERE run_id=?)", (run_id,))
+        db.execute("DELETE FROM result_news WHERE result_id IN (SELECT id FROM results WHERE run_id=?)", (run_id,))
+        db.execute("DELETE FROM results WHERE run_id=?", (run_id,))
+        db.commit()
+        for r in results:
+            insert_result(run_id, r.to_dict())
 
     def search_only(self) -> List[Dict]:
         """
@@ -669,40 +664,24 @@ class StockResearcher:
         return all_results
 
     def save_search_data(self, search_results: List[Dict]) -> str:
-        """
-        仅保存搜索数据（不生成纪要）
+        """仅保存搜索数据到数据库（不生成纪要）"""
+        from database import insert_run, insert_result, init_db
+        init_db()
+        run_id = insert_run(self.today_str, self.search_provider_type, is_backfill=False)
+        for r in search_results:
+            insert_result(run_id, r)
 
-        Args:
-            search_results: 搜索结果列表
-
-        Returns:
-            保存的数据文件路径
-        """
-        output_dir = self.config.get_output_dir_for_date(self.today_str)
-
-        # 保存原始数据
-        data_file = os.path.join(output_dir, f"{self.now_str}-搜索数据.json")
-        data = {
-            "date": self.today_str,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "results": search_results,
-            "search_provider": self.search_provider_type,
-            "mode": "searchOnly"
-        }
-        with open(data_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-
-        logger.info(f"搜索数据已保存: {data_file}")
+        logger.info(f"搜索数据已保存到数据库: run_id={run_id}")
         logger.info(f"  - 包含 {len(search_results)} 个目标")
         for result in search_results:
             count = len(result.get('news_list', []))
             logger.info(f"    - {result['target_name']}: {count} 条新闻")
 
-        return data_file
+        return f"db:run_id={run_id}"
 
     def save_results(self, results: List[ResearchResult]) -> str:
         """
-        保存研究结果到文件
+        保存研究结果（数据库 + 纪要 Markdown）
 
         Args:
             results: 研究结果列表
@@ -712,30 +691,13 @@ class StockResearcher:
         """
         output_dir = self.config.get_output_dir_for_date(self.today_str)
 
-        # 使用Tavily搜索时才保存原始数据（search-engine的数据在本地其他目录已记录）
-        if self.search_provider_type == "tavily":
-            # 保存原始数据
-            data_file = os.path.join(output_dir, f"{self.now_str}-数据.json")
-            data = {
-                "date": self.today_str,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "results": [r.to_dict() for r in results],
-                "search_provider": "tavily"
-            }
-            with open(data_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info(f"原始数据已保存: {data_file}")
-        else:
-            logger.info("使用search-engine搜索，原始数据已在search-engine目录记录，此处仅保存纪要")
-
         # 保存投研纪要（始终保存）
         md_file = os.path.join(output_dir, f"{self.now_str}-纪要.md")
         md_content = self._generate_markdown_report(results)
         with open(md_file, "w", encoding="utf-8") as f:
             f.write(md_content)
 
-        logger.info(f"结果已保存")
-        logger.info(f"  - {data_file}")
+        logger.info(f"结果已保存到数据库 + 纪要文件")
         logger.info(f"  - {md_file}")
 
         # 保存争议值解释文件

@@ -1,59 +1,35 @@
 """
 配置管理模块
-负责加载和管理所有配置项
+所有配置项集中在此，直接改这个文件即可，无 .env 依赖。
 """
 import os
-from dotenv import load_dotenv
 from typing import List, Dict
 
 
 class Config:
-    """配置管理类"""
+    """配置管理类 —— 改这里的默认值就是改全局配置"""
 
-    def __init__(self, env_file: str = ".env"):
-        """
-        初始化配置
-
-        Args:
-            env_file: 环境变量文件路径
-        """
-        # 加载环境变量
-        if os.path.exists(env_file):
-            load_dotenv(env_file)
-        else:
-            print(f"警告: 配置文件 {env_file} 不存在，使用默认配置")
-
-        # flash keys: sk-23e14718482342fd8b4b1ff7d0232c8d
+    def __init__(self):
         # ========== API 配置 ==========
         self.DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-0a3f7ffc68eb4f84b9a906085d9842e3")
         self.DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
         self.DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
-        # Tavily API Keys（支持多个key，432限流时自动切换）
-        # 可通过 TAVILY_API_KEYS 环境变量配置，逗号分隔
-        _default_keys = [
+        # Tavily API Keys —— 多 Key 自动切换（432 限流时）
+        # 改这里：在列表最前面加新 Key
+        self.TAVILY_API_KEYS = [
+            "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",
             "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",
             "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",
             "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",
             "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",
-            "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"
+            "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",
+            "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"
         ]
-        _keys_env = os.getenv("TAVILY_API_KEYS", "")
-        if _keys_env:
-            raw_keys = [k.strip() for k in _keys_env.split(",") if k.strip()]
-            # 过滤明显无效的 key（含非 ASCII 字符或占位符）
-            self.TAVILY_API_KEYS = [k for k in raw_keys if k.isascii() and not k.startswith("你的")]
-            if self.TAVILY_API_KEYS and len(self.TAVILY_API_KEYS) < len(raw_keys):
-                from logger import get_logger
-                logger = get_logger()
-                logger.warning(f"已过滤 {len(raw_keys) - len(self.TAVILY_API_KEYS)} 个无效 API Key（含非ASCII字符）")
-        if not getattr(self, 'TAVILY_API_KEYS', None):
-            # 兼容单key配置
-            _single_key = os.getenv("TAVILY_API_KEY", "")
-            if _single_key:
-                self.TAVILY_API_KEYS = [_single_key] + _default_keys
-            else:
-                self.TAVILY_API_KEYS = _default_keys
+        # 过滤无效 Key
+        self.TAVILY_API_KEYS = [k for k in self.TAVILY_API_KEYS if k.isascii() and not k.startswith("你的")]
+        if not self.TAVILY_API_KEYS:
+            self.TAVILY_API_KEYS = ["MISSING_API_KEY"]
         self.TAVILY_API_KEY = self.TAVILY_API_KEYS[0]
 
         # ========== 定时任务配置 ==========
@@ -231,17 +207,9 @@ class Config:
 _config = None
 
 
-def get_config(env_file: str = ".env") -> Config:
-    """
-    获取全局配置实例（单例模式）
-
-    Args:
-        env_file: 环境变量文件路径
-
-    Returns:
-        Config 实例
-    """
+def get_config() -> Config:
+    """获取全局配置实例（单例模式）"""
     global _config
     if _config is None:
-        _config = Config(env_file)
+        _config = Config()
     return _config

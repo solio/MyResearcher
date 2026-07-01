@@ -22,7 +22,7 @@ def run_once(target_date: str = None, start_from: str = None):
     logger = get_logger()
 
     if not config.validate():
-        logger.error("配置验证失败，请检查 .env 文件")
+        logger.error("配置验证失败，请检查 config.py")
         return
 
     researcher = StockResearcher(config, target_date=target_date)
@@ -39,7 +39,7 @@ def run_search_only(target_date: str = None):
     logger = get_logger()
 
     if not config.validate():
-        logger.error("配置验证失败，请检查 .env 文件")
+        logger.error("配置验证失败，请检查 config.py")
         return
 
     researcher = StockResearcher(config, target_date=target_date)
@@ -53,9 +53,12 @@ def run_daemon():
     scheduler.start()
 
 
-def supplement_news(data_file: str):
-    """为已有投研数据补充Tavily新闻搜索，重算V3情绪并更新纪要"""
+def supplement_news(data_file: str = None, date_str: str = None):
+    """为已有投研数据补充Tavily新闻搜索，重算V3情绪并更新纪要。
+    支持两种输入：JSON文件路径（向后兼容）或直接指定日期（从数据库读取）。
+    """
     import json
+    import re
     from pathlib import Path
     from searcher import TavilySearchProvider, NewsDeduplicator
     from llm import DeepSeekLLMProvider, StockAnalyzer
@@ -66,17 +69,27 @@ def supplement_news(data_file: str):
                  log_level=config.LOG_LEVEL)
     logger = get_logger()
 
-    # 加载数据文件
-    data_path = Path(data_file)
-    if not data_path.exists():
-        logger.error(f"数据文件不存在: {data_file}")
+    # 加载数据：优先从数据库，其次从 JSON 文件（向后兼容）
+    if date_str:
+        from database import init_db, get_results_by_date
+        init_db()
+        results_data = get_results_by_date(date_str)
+        if not results_data:
+            logger.error(f"数据库中无 {date_str} 的数据")
+            return
+        logger.info(f"从数据库加载: {date_str}, {len(results_data)} 个标的")
+    elif data_file:
+        data_path = Path(data_file)
+        if not data_path.exists():
+            logger.error(f"数据文件不存在: {data_file}")
+            return
+        with open(data_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        results_data = data.get("results", [])
+        date_str = data.get("date", "")
+    else:
+        logger.error("请指定 --supplement DATA_FILE 或 --date YYYYMMDD")
         return
-
-    with open(data_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    results_data = data.get("results", [])
-    date_str = data.get("date", "")
 
     # 统计需要补充的标的（缺少新闻或缺少雪球）
     need_supplement = []
@@ -237,28 +250,46 @@ def supplement_news(data_file: str):
         except Exception as e:
             logger.error(f"  补充 {target_name} 失败: {e}")
 
-    # 覆盖原数据JSON（原地补充）
-    data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(data_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    # 更新数据库
+    if date_str:
+        from database import init_db, get_db, update_result
+        init_db()
+        db = get_db()
+        run_row = db.execute(
+            "SELECT id FROM research_runs WHERE date=? AND is_backfill=0 ORDER BY id DESC LIMIT 1",
+            (date_str,)
+        ).fetchone()
+        if run_row:
+            run_id = run_row["id"]
+            for r in results_data:
+                rid = r.get("id")
+                if rid:
+                    update_result(rid, r)
+            logger.info(f"  数据库已更新: run_id={run_id}")
+        else:
+            logger.warning("未找到对应 research_run，跳过数据库更新")
+    elif data_file:
+        # 向后兼容：写回 JSON 文件
+        data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(data_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
-    # 覆盖原纪要MD
-    md_path = str(data_path).replace("-数据.json", "-纪要.md").replace("-数据-补充.json", "-纪要.md")
-    if os.path.exists(md_path):
-        md = _generate_markdown_from_dict(results_data, data.get("timestamp", ""))
+    # 生成/更新纪要 MD
+    md_path = None
+    if data_file:
+        md_path = str(data_path).replace("-数据.json", "-纪要.md").replace("-数据-补充.json", "-纪要.md")
+    elif date_str:
+        md_path = os.path.join(config.OUTPUT_DIR, date_str,
+                               f"{date_str}_supplement-纪要.md")
+    if md_path:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        md = _generate_markdown_from_dict(results_data, ts)
+        os.makedirs(os.path.dirname(md_path), exist_ok=True)
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(md)
         logger.info(f"  纪要已更新: {md_path}")
-    else:
-        # 原纪要不存在（可能是searchOnly产物），新生成
-        md_path = str(data_path).replace("-数据.json", "-纪要.md")
-        md = _generate_markdown_from_dict(results_data, data.get("timestamp", ""))
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(md)
-        logger.info(f"  纪要已创建: {md_path}")
 
     logger.info(f"补充完成: {updated_count} 个标的")
-    logger.info(f"  数据已更新: {data_path}")
 
 
 def _generate_markdown_from_dict(results_data: list, timestamp: str) -> str:

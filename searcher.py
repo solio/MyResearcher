@@ -146,7 +146,14 @@ class TavilySearchProvider(BaseSearchProvider):
             self.api_keys = [api_key]
         else:
             self.api_keys = []
-        self._key_index = 0
+        # 从数据库加载上次使用的 key index，避免每次从第一个重试
+        try:
+            from database import get_active_tavily_key_index
+            self._key_index = get_active_tavily_key_index(0)
+            if self._key_index >= len(self.api_keys):
+                self._key_index = 0
+        except Exception:
+            self._key_index = 0
         self.timeout = timeout
         self.max_retries = max_retries
         self.tavily_time_range_days = tavily_time_range_days
@@ -173,7 +180,13 @@ class TavilySearchProvider(BaseSearchProvider):
         if self._key_index >= len(self.api_keys):
             self._key_index = 0
             return False  # 已轮完一圈
-        logger.warning(f"Tavily API Key 切换: 第 {self._key_index + 1}/{len(self.api_keys)} 个")
+        # 持久化 key index，下次启动继续用这个 key
+        try:
+            from database import set_active_tavily_key_index
+            set_active_tavily_key_index(self._key_index)
+        except Exception:
+            pass
+        logger.warning(f"Tavily API Key 切换: 第 {self._key_index + 1}/{len(self.api_keys)} 个（已保存）")
         return True
 
     def _search_once(self, query: str, max_results: int,
